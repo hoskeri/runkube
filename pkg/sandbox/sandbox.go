@@ -365,7 +365,6 @@ func (s *Sandbox) run() error {
 
 	s.setHostname()
 	s.mount(fsProc, "proc", "proc")
-	s.fakeProcfs()
 	s.mount(fsCgroup2, "cgroup2", "sys/fs/cgroup")
 	s.mount(fsDev, "dev", "dev")
 	s.mount(fsDevPts, "devpts", "dev/pts")
