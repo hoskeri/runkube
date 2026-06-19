@@ -13,6 +13,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/hoskeri/runkube/pkg/sandbox/fdchan"
 	"github.com/hoskeri/runkube/pkg/sandbox/procfs"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
@@ -316,29 +317,7 @@ func (s *Sandbox) debugShell() error {
 	return nil
 }
 
-// TODO follow SD_LISTEN_FDS convention.
-const fdNameProxy = "fd_name_proxy"
-
-func passFD(via string, f *os.File) error {
-	var viaFd int
-	if _, err := fmt.Sscanf(os.Getenv(via), "%d", &viaFd); err != nil {
-		return fmt.Errorf("passFd.Scanf %q: %w", via, err)
-	}
-
-	fdf, err := net.FileConn(os.NewFile(uintptr(viaFd), ""))
-	if err != nil {
-		return err
-	}
-	uc := fdf.(*net.UnixConn)
-	oob := unix.UnixRights(int(f.Fd()))
-	_, _, err = uc.WriteMsgUnix(nil, oob, nil)
-	if err != nil {
-		return err
-	}
-	return uc.Close()
-}
-
-func (s *Sandbox) startProxy() error {
+func (s *Sandbox) startProxy(responder func(fdchan.Message) error) error {
 	pl, err := net.Listen("tcp", ":8443")
 	if err != nil {
 		return err
@@ -351,12 +330,45 @@ func (s *Sandbox) startProxy() error {
 	}
 	defer c.Close()
 
-	return passFD(fdNameProxy, c)
+	resp := fdchan.Message{}
+	resp.Data = []byte("proxy-listener-fd")
+	resp.AddDescriptor(c, "proxy-listener", "tcp listener")
+	return responder(resp)
 }
 
 func (s *Sandbox) run() error {
-	if err := s.startProxy(); err != nil {
+	child, err := fdchan.NewChild()
+	if err != nil {
 		return err
+	}
+
+	complete := false
+	for !complete {
+		req, responder, err := child.HandleRequest()
+		if err != nil {
+			return err
+		}
+
+		cmd := string(req.Data)
+		switch cmd {
+		case "ping":
+			resp := fdchan.Message{Data: []byte("pong")}
+			if err := responder(resp); err != nil {
+				return err
+			}
+		case "proxy-listener":
+			if err := s.startProxy(responder); err != nil {
+				return err
+			}
+		case "complete":
+			complete = true
+			resp := fdchan.Message{Data: []byte("completed")}
+			if err := responder(resp); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("unknown cmd %q", cmd)
+		}
 	}
 
 	if err := unix.Mount("tmpfs", s.rootDir(), "tmpfs", 0, ""); err != nil {
@@ -408,40 +420,37 @@ func (s *Sandbox) run() error {
 	return nil
 }
 
-func (s *Sandbox) sandboxProxyListener(fd int) error {
-	c, err := net.FileConn(os.NewFile(uintptr(fd), ""))
-	if err != nil {
-		return err
-	}
-	unixConn := c.(*net.UnixConn)
-	oob := make([]byte, unix.CmsgSpace(8))
-	_, _, _, _, err = unixConn.ReadMsgUnix(nil, oob)
+func (s *Sandbox) sandboxProxyListener(control *fdchan.Parent) error {
+	resp, err := control.Request(fdchan.Message{Data: []byte("proxy-listener")})
 	if err != nil {
 		return err
 	}
 
-	msg, err := unix.ParseSocketControlMessage(oob)
+	if string(resp.Data) != "proxy-listener-fd" {
+		return fmt.Errorf("unexpected response, got %#v", resp)
+	}
+
+	lfd, _, err := resp.GetDescriptor("proxy-listener")
+	if err != nil {
+		return fmt.Errorf("proxy-listener get descriptor error %w", err)
+	}
+
+	l, err := net.FileListener(lfd)
 	if err != nil {
 		return err
 	}
 
-	fds, err := unix.ParseUnixRights(&msg[0])
-	if err != nil {
-		return err
-	}
+	go func() {
+		// TODO move egress inputs to config.
+		egress, err := NewForwarder(SingleHost("[::1]:6443"))
+		if err != nil {
+			return
+		}
 
-	l, err := net.FileListener(os.NewFile(uintptr(fds[0]), ""))
-	if err != nil {
-		return err
-	}
+		http.Serve(l, egress)
+	}()
 
-	// TODO move egress inputs to config.
-	egress, err := NewForwarder(SingleHost("[::1]:6443"))
-	if err != nil {
-		return err
-	}
-
-	return http.Serve(l, egress)
+	return nil
 }
 
 // Run bootstraps and runs a sandbox
@@ -451,17 +460,12 @@ func (s *Sandbox) Run() error {
 		return err
 	}
 
-	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM, 0)
+	control, err := fdchan.NewParent()
 	if err != nil {
-		return fmt.Errorf("unix.Socketpair: %w", err)
+		return err
 	}
 
-	go func() {
-		if err := s.sandboxProxyListener(fds[0]); err != nil {
-			slog.Error("sandboxProxyListener", "err", err)
-			os.Exit(1)
-		}
-	}()
+	childFD := control.ChildFD()
 
 	proc, err := os.StartProcess(
 		"/proc/self/exe",
@@ -486,14 +490,27 @@ func (s *Sandbox) Run() error {
 				os.Stdin,
 				os.Stdout,
 				os.Stderr,
-				os.NewFile(uintptr(fds[1]), ""),
+				os.NewFile(uintptr(childFD), ""),
 			},
 			Env: []string{
-				fmt.Sprintf("%s=%d", fdNameProxy, fds[1]),
+				fmt.Sprintf("%s=%d", fdchan.EnvVarKey, childFD),
 			},
 		})
 	if err != nil {
 		return fmt.Errorf("sandbox.Run %w", err)
+	}
+
+	if err := s.sandboxProxyListener(control); err != nil {
+		return err
+	}
+
+	resp, err := control.Request(fdchan.Message{Data: []byte("complete")})
+	if err != nil {
+		return err
+	}
+
+	if string(resp.Data) != "completed" {
+		return fmt.Errorf("unexpected response, got %#v", resp)
 	}
 
 	slog.Debug("sandbox.Run started", "pid", proc.Pid)
