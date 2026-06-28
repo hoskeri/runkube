@@ -6,12 +6,11 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"runtime"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
-
-// --- Private definitions for Seccomp User Notify (matching Linux UAPI) ---
 
 type seccompData struct {
 	Nr                 int32
@@ -42,31 +41,67 @@ type seccompNotifAddfd struct {
 	NewfdFlags uint32
 }
 
-// InstallFilter configures PR_SET_NO_NEW_PRIVS and loads the Seccomp filter
-// targeting open (SYS_OPEN), openat (SYS_OPENAT), and openat2 (SYS_OPENAT2)
-// with SECCOMP_RET_USER_NOTIF.
-// It returns the seccomp listener file descriptor, which must be closed by the caller.
-func InstallFilter() (int, error) {
-	slog.Debug("installing seccomp filter in child", "syscalls", []string{"open", "openat", "openat2"})
+// SupervisorConfig contains dynamic handler callbacks for system calls.
+type SupervisorConfig struct {
+	// OpenCallback handles file open operations. Return (*content, nil) to spoof with an in-memory memfd,
+	// or (nil, nil) to pass the call through natively to the kernel.
+	OpenCallback func(pid uint32, path string) (*string, error)
 
-	// Drop privileges to ensure non-root child can register seccomp filters.
+	// StatCallback handles path-based fstatat queries. Return nil, nil to pass-through.
+	StatCallback func(pid uint32, path string) (*unix.Stat_t, error)
+
+	// StatxCallback handles modern path-based statx queries. Return nil, nil to pass-through.
+	StatxCallback func(pid uint32, path string) (*unix.Statx_t, error)
+
+	// StatfsCallback handles filesystem queries (e.g. statfs translations). Return nil, nil to pass-through.
+	StatfsCallback func(pid uint32, path string) (*unix.Statfs_t, error)
+}
+
+type syscallMetadata struct {
+	name       string
+	pathArgIdx int // Index in Data.Args where the path string pointer lives
+	handler    func(dupFd int, req *seccompNotif, path string, config *SupervisorConfig) (handled bool, err error)
+}
+
+var syscallRegistry = map[int32]syscallMetadata{
+	unix.SYS_OPEN:       {name: "open", pathArgIdx: 0, handler: handleOpenFamily},
+	unix.SYS_OPENAT:     {name: "openat", pathArgIdx: 1, handler: handleOpenFamily},
+	unix.SYS_OPENAT2:    {name: "openat2", pathArgIdx: 1, handler: handleOpenFamily},
+	unix.SYS_NEWFSTATAT: {name: "newfstatat", pathArgIdx: 1, handler: handleStatFamily},
+	unix.SYS_STATX:      {name: "statx", pathArgIdx: 1, handler: handleStatxFamily},
+	unix.SYS_STATFS:     {name: "statfs", pathArgIdx: 0, handler: handleStatfsFamily},
+}
+
+// InstallFilter configures PR_SET_NO_NEW_PRIVS and loads the Seccomp filter
+// targeting file open (open/openat/openat2), stat (newfstatat/statx), and file system stat (statfs)
+// with SECCOMP_RET_USER_NOTIF.
+func InstallFilter() (int, error) {
+	slog.Debug("installing seccomp filter in child")
+
+	runtime.LockOSThread()
 	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
 		return -1, fmt.Errorf("failed to set PR_SET_NO_NEW_PRIVS: %w", err)
 	}
 
-	// Create Seccomp filter targeting open, openat, and openat2 using raw SockFilter definitions
+	// Create Seccomp filter using raw SockFilter definitions
 	filter := []unix.SockFilter{
 		// Load Syscall Number (Offset 0 of seccomp_data struct)
 		{Code: unix.BPF_LD + unix.BPF_W + unix.BPF_ABS, K: 0},
-		// Check if it matches openat (SYS_OPENAT). If True, jump 2 instructions forward to Match.
-		{Code: unix.BPF_JMP + unix.BPF_JEQ + unix.BPF_K, K: uint32(unix.SYS_OPENAT), Jt: 2, Jf: 0},
-		// Check if it matches open (SYS_OPEN). If True, jump 1 instruction forward to Match.
-		{Code: unix.BPF_JMP + unix.BPF_JEQ + unix.BPF_K, K: uint32(unix.SYS_OPEN), Jt: 1, Jf: 0},
-		// Check if it matches openat2 (SYS_OPENAT2). If True, execute next instruction. If False, skip next instruction.
-		{Code: unix.BPF_JMP + unix.BPF_JEQ + unix.BPF_K, K: uint32(unix.SYS_OPENAT2), Jt: 0, Jf: 1},
-		// Match (Instruction 4): Dispatch to Seccomp User Notifier listener
+		// Check SYS_OPEN (jump 5 instructions on match)
+		{Code: unix.BPF_JMP + unix.BPF_JEQ + unix.BPF_K, K: uint32(unix.SYS_OPEN), Jt: 5, Jf: 0},
+		// Check SYS_OPENAT (jump 4 instructions on match)
+		{Code: unix.BPF_JMP + unix.BPF_JEQ + unix.BPF_K, K: uint32(unix.SYS_OPENAT), Jt: 4, Jf: 0},
+		// Check SYS_OPENAT2 (jump 3 instructions on match)
+		{Code: unix.BPF_JMP + unix.BPF_JEQ + unix.BPF_K, K: uint32(unix.SYS_OPENAT2), Jt: 3, Jf: 0},
+		// Check SYS_NEWFSTATAT (jump 2 instructions on match)
+		{Code: unix.BPF_JMP + unix.BPF_JEQ + unix.BPF_K, K: uint32(unix.SYS_NEWFSTATAT), Jt: 2, Jf: 0},
+		// Check SYS_STATX (jump 1 instruction on match)
+		{Code: unix.BPF_JMP + unix.BPF_JEQ + unix.BPF_K, K: uint32(unix.SYS_STATX), Jt: 1, Jf: 0},
+		// Check SYS_STATFS (match executes next, else jump to allow)
+		{Code: unix.BPF_JMP + unix.BPF_JEQ + unix.BPF_K, K: uint32(unix.SYS_STATFS), Jt: 0, Jf: 1},
+		// Match: Dispatch to Seccomp User Notifier listener
 		{Code: unix.BPF_RET + unix.BPF_K, K: unix.SECCOMP_RET_USER_NOTIF},
-		// No Match (Instruction 5): Allow syscall execution
+		// No Match: Allow syscall execution
 		{Code: unix.BPF_RET + unix.BPF_K, K: unix.SECCOMP_RET_ALLOW},
 	}
 
@@ -90,121 +125,234 @@ func InstallFilter() (int, error) {
 	return int(listenerFd), nil
 }
 
-// Supervise runs the parent supervisor loop. It blocks, listening for file open
-// notifications on the listenerFd, reads memory via process_vm_readv(2), and handles spoofing
-// matching paths dynamically using atomic FD injection.
-func Supervise(listenerFd int, mockFiles map[string]string) error {
-	slog.Debug("supervisor loop started", "listener_fd", listenerFd)
+// Supervise runs the parent supervisor loop. It blocks, listening for file operations
+// on the listenerFd, reads memory via process_vm_readv(2), and delegates processing to
+// highly focused specialized syscall handlers.
+func Supervise(dupFd int, config SupervisorConfig) error {
+	slog.Debug("supervisor loop started", "listener_fd", dupFd)
+
+	defer unix.Close(dupFd)
 
 	for {
 		var req seccompNotif
-		// SECCOMP_IOCTL_NOTIF_RECV blocks until a child makes a filtered syscall
-		err := ioctl(listenerFd, unix.SECCOMP_IOCTL_NOTIF_RECV, unsafe.Pointer(&req))
+		err := ioctl(dupFd, unix.SECCOMP_IOCTL_NOTIF_RECV, unsafe.Pointer(&req))
 		if err != nil {
 			if err == unix.EINTR {
 				continue
 			}
+			// EBADF and ENOTCONN mean the seccomp notify FD itself is dead (child exited entirely).
 			if errors.Is(err, unix.EBADF) || errors.Is(err, unix.ENOTCONN) {
 				slog.Debug("target child exited, stopping supervisor loop", "error", err)
 				return nil
 			}
+			// ENOENT and ESRCH here mean a pending system call was interrupted (e.g. via Go's SIGURG preemption)
+			// exactly while the supervisor's RECV ioctl was dequeuing it. We must simply retry.
+			if errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ESRCH) {
+				slog.Debug("RECV ioctl interrupted by tracee signal preemption, retrying", "error", err)
+				continue
+			}
 			return fmt.Errorf("RECV ioctl failed: %w", err)
 		}
 
-		// Identify the path argument address based on the syscall triggered
-		var pathAddr uint64
-		var syscallName string
-
-		switch req.Data.Nr {
-		case int32(unix.SYS_OPENAT), int32(unix.SYS_OPENAT2):
-			// For openat and openat2: openat(dfd, pathname, ...)
-			pathAddr = req.Data.Args[1]
-			if req.Data.Nr == int32(unix.SYS_OPENAT) {
-				syscallName = "openat"
-			} else {
-				syscallName = "openat2"
-			}
-		case int32(unix.SYS_OPEN):
-			// For open: open(pathname, flags, mode)
-			pathAddr = req.Data.Args[0]
-			syscallName = "open"
-		default:
+		// Resolve syscall metadata
+		meta, registered := syscallRegistry[req.Data.Nr]
+		if !registered {
 			slog.Debug("unexpected syscall number in supervisor", "nr", req.Data.Nr)
-			continueNoop(listenerFd, req.Id)
+			_ = continueNoop(dupFd, req.Id)
 			continue
 		}
 
+		// Resolve path from target child process space
+		pathAddr := req.Data.Args[meta.pathArgIdx]
 		path, err := readStringFromProcess(req.Pid, pathAddr)
 		if err != nil {
-			slog.Debug("failed to read path from child memory", "pid", req.Pid, "error", err)
-			continueNoop(listenerFd, req.Id)
+			slog.Debug("failed to read path from child memory (process likely terminated)", "pid", req.Pid, "error", err)
+			_ = continueNoop(dupFd, req.Id)
 			continue
 		}
 
 		cleanPath := filepath.Clean(path)
-		slog.Debug("intercepted syscall in child", "pid", req.Pid, "syscall", syscallName, "path", cleanPath)
+		slog.Debug("intercepted syscall in child", "pid", req.Pid, "syscall", meta.name, "path", cleanPath)
 
-		if mockContent, exists := mockFiles[cleanPath]; exists {
-			slog.Debug("path match found; injecting spoofed file descriptor", "path", cleanPath)
+		// Dispatch to target handler
+		handled, handlerErr := meta.handler(dupFd, &req, cleanPath, &config)
+		if handlerErr != nil {
+			slog.Error("handler execution failed", "syscall", meta.name, "path", cleanPath, "error", handlerErr)
+		}
 
-			// Create an anonymous in-memory file
-			memfd, err := unix.MemfdCreate("spoofed_asset", unix.MFD_CLOEXEC)
-			if err != nil {
-				slog.Debug("memfd_create failed", "error", err)
-				continueNoop(listenerFd, req.Id)
-				continue
-			}
-
-			// Write spoofed payload to memfd
-			if _, err := unix.Write(memfd, []byte(mockContent)); err != nil {
-				slog.Debug("memfd write failed", "error", err)
-				unix.Close(memfd)
-				continueNoop(listenerFd, req.Id)
-				continue
-			}
-
-			// Rewind fd so the child reads it from byte 0
-			if _, err := unix.Seek(memfd, 0, io.SeekStart); err != nil {
-				slog.Debug("memfd seek failed", "error", err)
-				unix.Close(memfd)
-				continueNoop(listenerFd, req.Id)
-				continue
-			}
-
-			// Atomically inject the memfd into target and respond to notification
-			addfd := seccompNotifAddfd{
-				Id:         req.Id,
-				Flags:      unix.SECCOMP_ADDFD_FLAG_SEND, // Atomically returns the FD as syscall return val
-				Srcfd:      uint32(memfd),
-				Newfd:      0, // Let OS pick child's fd slot
-				NewfdFlags: 0,
-			}
-
-			err = ioctl(listenerFd, unix.SECCOMP_IOCTL_NOTIF_ADDFD, unsafe.Pointer(&addfd))
-			unix.Close(memfd) // Safe to close local end now
-			if err != nil {
-				slog.Debug("ADDFD ioctl failed (requires Linux >= 5.14)", "error", err)
-				continueNoop(listenerFd, req.Id)
-			}
-		} else {
+		// Fall back to native execution if the handler declined or skipped spoofing
+		if !handled {
 			slog.Debug("no match found; executing passthrough", "path", cleanPath)
-			continueNoop(listenerFd, req.Id)
+			err = continueNoop(dupFd, req.Id)
+			if err != nil && errors.Is(err, unix.ENOENT) {
+				slog.Debug("continueNoop failed: notification expired or syscall interrupted", "id", req.Id)
+			}
 		}
 	}
 }
 
-// Tells the kernel to let the system call execute normally.
-func continueNoop(listenerFd int, reqId uint64) {
+func handleOpenFamily(dupFd int, req *seccompNotif, path string, config *SupervisorConfig) (bool, error) {
+	if config.OpenCallback == nil {
+		return false, nil
+	}
+
+	mockContent, err := config.OpenCallback(req.Pid, path)
+	if err != nil {
+		return true, handleCallbackError(dupFd, req.Id, err)
+	}
+	if mockContent == nil {
+		return false, nil
+	}
+
+	slog.Debug("path match found; injecting spoofed file descriptor", "path", path)
+	memfd, err := unix.MemfdCreate("spoofed_asset", unix.MFD_CLOEXEC)
+	if err != nil {
+		_ = continueNoop(dupFd, req.Id)
+		return true, fmt.Errorf("memfd_create failed: %w", err)
+	}
+	defer unix.Close(memfd)
+
+	if _, err := unix.Write(memfd, []byte(*mockContent)); err != nil {
+		_ = continueNoop(dupFd, req.Id)
+		return true, fmt.Errorf("memfd write failed: %w", err)
+	}
+
+	if _, err := unix.Seek(memfd, 0, io.SeekStart); err != nil {
+		_ = continueNoop(dupFd, req.Id)
+		return true, fmt.Errorf("memfd seek failed: %w", err)
+	}
+
+	addfd := seccompNotifAddfd{
+		Id:         req.Id,
+		Flags:      unix.SECCOMP_ADDFD_FLAG_SEND,
+		Srcfd:      uint32(memfd),
+		Newfd:      0,
+		NewfdFlags: 0,
+	}
+
+	err = ioctl(dupFd, unix.SECCOMP_IOCTL_NOTIF_ADDFD, unsafe.Pointer(&addfd))
+	if err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			slog.Debug("ADDFD failed: notification expired or syscall interrupted", "id", req.Id)
+		} else {
+			_ = continueNoop(dupFd, req.Id)
+			return true, fmt.Errorf("ADDFD ioctl failed: %w", err)
+		}
+	}
+
+	return true, nil
+}
+
+func handleStatFamily(dupFd int, req *seccompNotif, path string, config *SupervisorConfig) (bool, error) {
+	if config.StatCallback == nil {
+		return false, nil
+	}
+
+	stat, err := config.StatCallback(req.Pid, path)
+	if err != nil {
+		return true, handleCallbackError(dupFd, req.Id, err)
+	}
+	if stat == nil {
+		return false, nil
+	}
+
+	statbufAddr := req.Data.Args[2]
+	statBytes := (*[unsafe.Sizeof(*stat)]byte)(unsafe.Pointer(stat))[:]
+
+	if writeErr := writeToProcess(req.Pid, statbufAddr, statBytes); writeErr != nil {
+		_ = continueError(dupFd, req.Id, unix.EFAULT)
+		return true, fmt.Errorf("failed to write stat structure to child: %w", writeErr)
+	}
+
+	return true, continueSuccess(dupFd, req.Id, 0)
+}
+
+func handleStatxFamily(dupFd int, req *seccompNotif, path string, config *SupervisorConfig) (bool, error) {
+	if config.StatxCallback == nil {
+		return false, nil
+	}
+
+	statx, err := config.StatxCallback(req.Pid, path)
+	if err != nil {
+		return true, handleCallbackError(dupFd, req.Id, err)
+	}
+	if statx == nil {
+		return false, nil
+	}
+
+	statxbufAddr := req.Data.Args[4] // Arg[4] is *statxbuf
+	statxBytes := (*[unsafe.Sizeof(*statx)]byte)(unsafe.Pointer(statx))[:]
+
+	if writeErr := writeToProcess(req.Pid, statxbufAddr, statxBytes); writeErr != nil {
+		_ = continueError(dupFd, req.Id, unix.EFAULT)
+		return true, fmt.Errorf("failed to write statx structure to child: %w", writeErr)
+	}
+
+	return true, continueSuccess(dupFd, req.Id, 0)
+}
+
+func handleStatfsFamily(dupFd int, req *seccompNotif, path string, config *SupervisorConfig) (bool, error) {
+	if config.StatfsCallback == nil {
+		return false, nil
+	}
+
+	statfs, err := config.StatfsCallback(req.Pid, path)
+	if err != nil {
+		return true, handleCallbackError(dupFd, req.Id, err)
+	}
+	if statfs == nil {
+		return false, nil
+	}
+
+	bufAddr := req.Data.Args[1] // Arg[1] is *buf (struct statfs)
+	statfsBytes := (*[unsafe.Sizeof(*statfs)]byte)(unsafe.Pointer(statfs))[:]
+
+	if writeErr := writeToProcess(req.Pid, bufAddr, statfsBytes); writeErr != nil {
+		_ = continueError(dupFd, req.Id, unix.EFAULT)
+		return true, fmt.Errorf("failed to write statfs structure to child: %w", writeErr)
+	}
+
+	return true, continueSuccess(dupFd, req.Id, 0)
+}
+
+func continueNoop(listenerFd int, reqId uint64) error {
 	resp := seccompNotifResp{
 		Id:    reqId,
 		Val:   0,
 		Error: 0,
 		Flags: unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE,
 	}
-	_ = ioctl(listenerFd, unix.SECCOMP_IOCTL_NOTIF_SEND, unsafe.Pointer(&resp))
+	return ioctl(listenerFd, unix.SECCOMP_IOCTL_NOTIF_SEND, unsafe.Pointer(&resp))
 }
 
-// Low-level helper to peek into the target tracee's memory space using process_vm_readv(2)
+func continueSuccess(listenerFd int, reqId uint64, val int64) error {
+	resp := seccompNotifResp{
+		Id:    reqId,
+		Val:   val,
+		Error: 0,
+		Flags: 0,
+	}
+	return ioctl(listenerFd, unix.SECCOMP_IOCTL_NOTIF_SEND, unsafe.Pointer(&resp))
+}
+
+func continueError(listenerFd int, reqId uint64, errNo unix.Errno) error {
+	resp := seccompNotifResp{
+		Id:    reqId,
+		Val:   -1,
+		Error: int32(errNo),
+		Flags: 0,
+	}
+	return ioctl(listenerFd, unix.SECCOMP_IOCTL_NOTIF_SEND, unsafe.Pointer(&resp))
+}
+
+func handleCallbackError(listenerFd int, reqId uint64, err error) error {
+	if errno, ok := errors.AsType[unix.Errno](err); ok {
+		return continueError(listenerFd, reqId, errno)
+	}
+	return continueError(listenerFd, reqId, unix.EIO)
+}
+
+// readStringFromProcess peeks into the target tracee's memory space via process_vm_readv(2).
 func readStringFromProcess(pid uint32, addr uint64) (string, error) {
 	var result []byte
 	offset := addr
@@ -220,16 +368,17 @@ func readStringFromProcess(pid uint32, addr uint64) (string, error) {
 			Len:  len(buf),
 		}
 
-		// Perform zero-copy process virtual memory read across address spaces
 		n, err := unix.ProcessVMReadv(int(pid), []unix.Iovec{localIov}, []unix.RemoteIovec{remoteIov}, 0)
 		if err != nil {
+			if errors.Is(err, unix.EINTR) {
+				continue
+			}
 			return "", err
 		}
 		if n <= 0 {
 			break
 		}
 
-		// Look for the NULL terminator in the chunk
 		for i := range n {
 			if buf[i] == 0 {
 				result = append(result, buf[:i]...)
@@ -240,6 +389,34 @@ func readStringFromProcess(pid uint32, addr uint64) (string, error) {
 		offset += uint64(n)
 	}
 	return string(result), nil
+}
+
+// writeToProcess writes data to the target tracee's memory space using process_vm_writev(2).
+func writeToProcess(pid uint32, addr uint64, data []byte) error {
+	written := 0
+	for written < len(data) {
+		localIov := unix.Iovec{
+			Base: &data[written],
+			Len:  uint64(len(data) - written),
+		}
+		remoteIov := unix.RemoteIovec{
+			Base: uintptr(addr) + uintptr(written),
+			Len:  len(data) - written,
+		}
+
+		n, err := unix.ProcessVMWritev(int(pid), []unix.Iovec{localIov}, []unix.RemoteIovec{remoteIov}, 0)
+		if err != nil {
+			if errors.Is(err, unix.EINTR) {
+				continue
+			}
+			return err
+		}
+		if n <= 0 {
+			return fmt.Errorf("unexpected short write of 0 bytes during process_vm_writev")
+		}
+		written += n
+	}
+	return nil
 }
 
 func ioctl(fd int, req uint, arg unsafe.Pointer) error {

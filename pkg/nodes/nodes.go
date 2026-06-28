@@ -187,6 +187,9 @@ func (c *Node) sandboxConfig() (*sandbox.Config, error) {
 			{Target: "/sys/devices/system/node/node0/cpu0/topology/core_id", Source: sandbox.PayloadSource{Type: "write", Value: "0"}},
 			{Target: "/sys/devices/system/node/node0/cpu0/topology/physical_package_id", Source: sandbox.PayloadSource{Type: "write", Value: "0"}},
 		},
+		Features: sandbox.Features{
+			SyscallFilter: true,
+		},
 	}, nil
 }
 

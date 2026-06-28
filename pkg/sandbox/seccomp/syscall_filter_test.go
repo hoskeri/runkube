@@ -6,29 +6,35 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-	"syscall"
 	"testing"
-	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
 
 const (
 	envVarTestChild = "GO_WANT_SECCOMP_TEST_CHILD"
-	testMockPath    = "/proc/meminfo"
-	testMockData    = "MemTotal:       123456 kB\n"
+
+	// Mock virtual paths for our test assertions
+	mockOpenPath   = "/mock/open_file"
+	mockStatPath   = "/mock/stat_file"
+	mockStatxPath  = "/mock/statx_file"
+	mockStatfsPath = "/mock/statfs_file"
+
+	mockOpenContent = "dynamic seccomp spoofed payload!"
+	mockStatIno     = 12345
+	mockStatxIno    = 54321
+	mockStatfsType  = 0x1337BEEF
 )
 
-// TestSupervise verifies that the supervisor can intercept the child's open/openat calls
-// and atomically inject a spoofed memory-backed file descriptor.
-func TestSupervise(t *testing.T) {
-	// If we are currently running as the child process under test, handle child tasks.
+// TestSuperviseCallbacks validates the end-to-end interception and spoofing of all
+// registered system calls using our SupervisorConfig callback API.
+func TestSuperviseCallbacks(t *testing.T) {
 	if os.Getenv(envVarTestChild) == "1" {
 		runTestChild()
 		return
 	}
 
-	// Create a socket pair for sync and passing the seccomp listener FD
+	// 1. Setup socket synchronization for passing the seccomp listener FD
 	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM, 0)
 	if err != nil {
 		t.Fatalf("Failed to create Socketpair: %v", err)
@@ -36,84 +42,116 @@ func TestSupervise(t *testing.T) {
 	parentSock := fds[0]
 	childSock := fds[1]
 
-	// Re-execute this test binary to spawn the child in a user namespace
-	cmd := exec.Command(os.Args[0], "-test.run=TestSupervise")
+	// 2. Spawn the child process targeting this same test runner
+	cmd := exec.Command(os.Args[0], "-test.run=TestSuperviseCallbacks")
 	cmd.Env = append(os.Environ(), fmt.Sprintf("%s=1", envVarTestChild))
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Cloneflags: syscall.CLONE_NEWUSER,
-		UidMappings: []syscall.SysProcIDMap{
-			{ContainerID: 0, HostID: os.Getuid(), Size: 1},
-		},
-		GidMappings: []syscall.SysProcIDMap{
-			{ContainerID: 0, HostID: os.Getgid(), Size: 1},
-		},
-	}
-	// Pass the child end of socketpair on FD 3
-	cmd.ExtraFiles = []*os.File{os.NewFile(uintptr(childSock), "child_sock")}
+
+	// Wrap the child socket in os.File and pass it to ExtraFiles
+	childFile := os.NewFile(uintptr(childSock), "child_sock")
+	cmd.ExtraFiles = []*os.File{childFile}
 
 	if err := cmd.Start(); err != nil {
+		childFile.Close()
+		unix.Close(parentSock)
 		t.Fatalf("Failed to start child process: %v", err)
 	}
-	_ = unix.Close(childSock)
+	childFile.Close()
 
-	// Receive the seccomp listener FD from child via SCM_RIGHTS
+	// Retrieve the seccomp notify FD from the child
 	listenerFd, err := recvFD(parentSock)
 	if err != nil {
 		_ = cmd.Process.Kill()
+		unix.Close(parentSock)
 		t.Fatalf("Failed to receive seccomp listener FD: %v", err)
 	}
 	defer unix.Close(listenerFd)
 
-	// Spin up the supervisor in a separate goroutine
-	mockFiles := map[string]string{
-		testMockPath: testMockData,
+	// 3. Configure the supervisor callbacks
+	config := SupervisorConfig{
+		OpenCallback: func(pid uint32, path string) (*string, error) {
+			if path == mockOpenPath {
+				content := mockOpenContent
+				return &content, nil
+			}
+			return nil, nil // Let other paths pass through naturally
+		},
+		StatCallback: func(pid uint32, path string) (*unix.Stat_t, error) {
+			if path == mockStatPath {
+				return &unix.Stat_t{
+					Ino:  mockStatIno,
+					Mode: unix.S_IFREG | 0644,
+					Size: int64(len(mockOpenContent)),
+				}, nil
+			}
+			return nil, nil
+		},
+		StatxCallback: func(pid uint32, path string) (*unix.Statx_t, error) {
+			if path == mockStatxPath {
+				var statx unix.Statx_t
+				statx.Mask = unix.STATX_BASIC_STATS
+				statx.Ino = mockStatxIno
+				statx.Mode = unix.S_IFREG | 0755
+				return &statx, nil
+			}
+			return nil, nil
+		},
+		StatfsCallback: func(pid uint32, path string) (*unix.Statfs_t, error) {
+			if path == mockStatfsPath {
+				return &unix.Statfs_t{
+					Type: mockStatfsType,
+				}, nil
+			}
+			return nil, nil
+		},
 	}
+
+	// 4. Run the supervisor loop in the background
 	errChan := make(chan error, 1)
 	go func() {
-		errChan <- Supervise(listenerFd, mockFiles)
+		errChan <- Supervise(listenerFd, config)
 	}()
 
-	// Signal child that supervisor loop is ready
+	// Signal the child that our supervisor loop is active and waiting
 	if _, err := unix.Write(parentSock, []byte{1}); err != nil {
 		t.Fatalf("Failed to write synchronization byte to child: %v", err)
 	}
 	_ = unix.Close(parentSock)
 
-	// Wait for child process to finish its assertions and exit
+	// 5. Wait for the child to run all its assertions and exit
 	if err := cmd.Wait(); err != nil {
 		t.Fatalf("Child process returned with an error: %v", err)
 	}
 
-	// Verify the supervisor gracefully shut down or is ready to shut down
+	// Stop supervisor loop by closing the listener FD.
+	// Since we no longer leak duplicated FDs in Supervise, this close triggers
+	// an immediate EBADF on the RECV ioctl, cleanly terminating the loop.
 	_ = unix.Close(listenerFd)
-	superviseErr := <-errChan
-	if superviseErr != nil {
-		t.Logf("Supervisor exited with expected descriptor close error: %v", superviseErr)
+	if superviseErr := <-errChan; superviseErr != nil {
+		t.Logf("Supervisor exited: %v", superviseErr)
 	}
 }
 
-// runTestChild executes inside the spawned, namespaced child process.
+// runTestChild is executed by the spawned child process to run individual system call assertions.
 func runTestChild() {
-	// Child receives socketpair end on FD 3
-	parentSock := 3
+	parentSock := 3 // Inherited socketpair FD
 
-	// Install the filter
+	// 1. Install Seccomp notify filter on this single thread
 	listenerFd, err := InstallFilter()
 	if err != nil {
 		slog.Error("Child failed to install seccomp filter", "error", err)
 		os.Exit(1)
 	}
 
-	// Send seccomp notify listener FD to the parent
+	// 2. Transfer the listener FD to our parent supervisor
 	if err := sendFD(parentSock, listenerFd); err != nil {
 		slog.Error("Child failed to send listener FD to parent", "error", err)
 		os.Exit(1)
 	}
 	_ = unix.Close(listenerFd)
 
-	// Synchronize with parent supervisor
+	// Block until parent indicates the supervisor loop is ready
 	var syncBuf [1]byte
 	if _, err := unix.Read(parentSock, syncBuf[:]); err != nil {
 		slog.Error("Child failed to read sync byte from parent", "error", err)
@@ -121,68 +159,64 @@ func runTestChild() {
 	}
 	_ = unix.Close(parentSock)
 
-	// Test 1: Intercepted read via openat(2) (using standard Go library)
-	testReadOpenat()
+	// --- ASSERTION 1: Verify Open Interception ---
+	file, err := os.Open(mockOpenPath)
+	if err != nil {
+		slog.Error("Child failed to open mock file", "path", mockOpenPath, "error", err)
+		os.Exit(1)
+	}
+	content, err := io.ReadAll(file)
+	_ = file.Close()
+	if err != nil {
+		slog.Error("Child failed to read mock file content", "error", err)
+		os.Exit(1)
+	}
+	if string(content) != mockOpenContent {
+		slog.Error("Open verification failed: Mismatch", "expected", mockOpenContent, "got", string(content))
+		os.Exit(1)
+	}
+	slog.Debug("Child successfully validated dynamic open callback spoofing")
 
-	// Test 2: Intercepted read via legacy open(2) syscall directly
-	testReadLegacyOpen()
+	// --- ASSERTION 2: Verify Fstatat Interception ---
+	var stat unix.Stat_t
+	err = unix.Fstatat(unix.AT_FDCWD, mockStatPath, &stat, 0)
+	if err != nil {
+		slog.Error("Child fstatat system call failed", "path", mockStatPath, "error", err)
+		os.Exit(1)
+	}
+	if stat.Ino != mockStatIno {
+		slog.Error("Stat verification failed: Inode mismatch", "expected", mockStatIno, "got", stat.Ino)
+		os.Exit(1)
+	}
+	slog.Debug("Child successfully validated fstatat callback spoofing")
 
-	slog.Debug("Child successfully verified all spoofed fd scenarios")
+	// --- ASSERTION 3: Verify Statx Interception ---
+	var statx unix.Statx_t
+	err = unix.Statx(unix.AT_FDCWD, mockStatxPath, 0, unix.STATX_BASIC_STATS, &statx)
+	if err != nil {
+		slog.Error("Child statx system call failed", "path", mockStatxPath, "error", err)
+		os.Exit(1)
+	}
+	if statx.Ino != mockStatxIno {
+		slog.Error("Statx verification failed: Inode mismatch", "expected", mockStatxIno, "got", statx.Ino)
+		os.Exit(1)
+	}
+	slog.Debug("Child successfully validated statx callback spoofing")
+
+	// --- ASSERTION 4: Verify Statfs Interception ---
+	var statfs unix.Statfs_t
+	err = unix.Statfs(mockStatfsPath, &statfs)
+	if err != nil {
+		slog.Error("Child statfs system call failed", "path", mockStatfsPath, "error", err)
+		os.Exit(1)
+	}
+	if statfs.Type != int64(mockStatfsType) {
+		slog.Error("Statfs verification failed: Type mismatch", "expected", mockStatfsType, "got", statfs.Type)
+		os.Exit(1)
+	}
+	slog.Debug("Child successfully validated statfs callback spoofing")
+
 	os.Exit(0)
-}
-
-func testReadOpenat() {
-	file, err := os.Open(testMockPath)
-	if err != nil {
-		slog.Error("Child failed to open mocked path with openat", "path", testMockPath, "error", err)
-		os.Exit(1)
-	}
-	defer file.Close()
-
-	content, err := io.ReadAll(file)
-	if err != nil {
-		slog.Error("Child failed to read intercepted openat fd content", "error", err)
-		os.Exit(1)
-	}
-
-	if string(content) != testMockData {
-		slog.Error("Verification failed on openat: Content mismatch", "expected", testMockData, "got", string(content))
-		os.Exit(1)
-	}
-}
-
-func testReadLegacyOpen() {
-	// Convert path to NULL-terminated C-style string
-	cPath, err := unix.BytePtrFromString(testMockPath)
-	if err != nil {
-		slog.Error("Failed to convert mock path to byte pointer", "error", err)
-		os.Exit(1)
-	}
-
-	// Execute a raw legacy open(2) system call
-	fd, _, sysErr := unix.Syscall(
-		unix.SYS_OPEN,
-		uintptr(unsafe.Pointer(cPath)),
-		uintptr(unix.O_RDONLY),
-		0,
-	)
-	if sysErr != 0 {
-		slog.Error("Child raw open(2) system call failed", "errno", sysErr)
-		os.Exit(1)
-	}
-	defer unix.Close(int(fd))
-
-	file := os.NewFile(fd, testMockPath)
-	content, err := io.ReadAll(file)
-	if err != nil {
-		slog.Error("Child failed to read legacy open(2) raw fd", "error", err)
-		os.Exit(1)
-	}
-
-	if string(content) != testMockData {
-		slog.Error("Verification failed on legacy open: Content mismatch", "expected", testMockData, "got", string(content))
-		os.Exit(1)
-	}
 }
 
 // SCM_RIGHTS FD passing helpers

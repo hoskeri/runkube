@@ -33,7 +33,6 @@ func (s *Sandbox) setupSyscallFilter(responder func(fdchan.Message) error) error
 }
 
 func (s *Sandbox) startSyscallFilter(control *fdchan.Parent) error {
-
 	procfsResp, err := control.Request(fdchan.Message{Data: []byte("seccomp-filter")})
 	if err != nil {
 		return err
@@ -49,9 +48,7 @@ func (s *Sandbox) startSyscallFilter(control *fdchan.Parent) error {
 
 	go func() {
 		filterFD := seccompFilterFD
-		if err := seccomp.Supervise(int(filterFD.Fd()), map[string]string{
-			// "/proc/mounts": "fake-mount-data\n",
-		}); err != nil {
+		if err := seccomp.Supervise(int(filterFD.Fd()), seccomp.SupervisorConfig{}); err != nil {
 			panic(err.Error())
 		}
 	}()
