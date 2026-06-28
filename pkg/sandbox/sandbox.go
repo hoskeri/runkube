@@ -10,11 +10,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 
 	"github.com/hoskeri/runkube/pkg/sandbox/fdchan"
-	"github.com/hoskeri/runkube/pkg/sandbox/procfs"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )
@@ -60,6 +60,12 @@ type Payload struct {
 	Source   PayloadSource `type:"source"`
 }
 
+type Features struct {
+	FakeProcFS    bool `json:"fakeProcFS"`
+	SyscallFilter bool `json:"syscallFilter"`
+	DebugLog      bool `json:"debugLog"`
+}
+
 // Config describes a sandbox
 type Config struct {
 	Version   string    `json:"version"`
@@ -69,6 +75,7 @@ type Config struct {
 	Command   []string  `json:"command"`
 	Env       []string  `json:"env"`
 	Payload   []Payload `json:"payload"`
+	Features  Features  `json:"features"`
 }
 
 // New creates a sandbox
@@ -105,12 +112,16 @@ type fsType struct {
 }
 
 var (
-	fsProc    = &fsType{fstype: "proc", flags: unix.MS_NODEV | unix.MS_NOEXEC | unix.MS_NOSUID | unix.MS_RELATIME}
-	fsCgroup2 = &fsType{fstype: "cgroup2", flags: unix.MS_NODEV | unix.MS_NOEXEC | unix.MS_NOSUID | unix.MS_RELATIME, opts: "memory_recursiveprot"}
-	fsTmpfs   = &fsType{fstype: "tmpfs", flags: unix.MS_NODEV | unix.MS_NOEXEC | unix.MS_NOSUID | unix.MS_RELATIME}
-	fsDevPts  = &fsType{fstype: "devpts", flags: unix.MS_NOEXEC | unix.MS_NOSUID | unix.MS_RELATIME}
-	fsDev     = &fsType{fstype: "tmpfs", flags: unix.MS_NOEXEC | unix.MS_NOSUID | unix.MS_RELATIME}
-	fsBindRO  = &fsType{fstype: "", flags: unix.MS_NOSUID | unix.MS_BIND | unix.MS_RDONLY | unix.MS_RELATIME}
+	fsCgroup2 = &fsType{
+		fstype: "cgroup2",
+		flags:  unix.MS_NODEV | unix.MS_NOEXEC | unix.MS_NOSUID | unix.MS_RELATIME,
+		opts:   "memory_recursiveprot",
+	}
+	fsProc   = &fsType{fstype: "proc", flags: unix.MS_NODEV | unix.MS_NOEXEC | unix.MS_NOSUID | unix.MS_RELATIME}
+	fsTmpfs  = &fsType{fstype: "tmpfs", flags: unix.MS_NODEV | unix.MS_NOEXEC | unix.MS_NOSUID | unix.MS_RELATIME}
+	fsDevPts = &fsType{fstype: "devpts", flags: unix.MS_NOEXEC | unix.MS_NOSUID | unix.MS_RELATIME}
+	fsDev    = &fsType{fstype: "tmpfs", flags: unix.MS_NOEXEC | unix.MS_NOSUID | unix.MS_RELATIME}
+	fsBindRO = &fsType{fstype: "", flags: unix.MS_NOSUID | unix.MS_BIND | unix.MS_RDONLY | unix.MS_RELATIME}
 )
 
 func (s *Sandbox) setHostname() error {
@@ -243,41 +254,6 @@ func (s *Sandbox) mount(f *fsType, src, dest string) error {
 	return s.lastError
 }
 
-func (s *Sandbox) fakeProcfs() error {
-	f := fsProc
-
-	if s.lastError != nil {
-		return fmt.Errorf("previous error %w", s.lastError)
-	}
-
-	s.lastError = func() error {
-		realProc := filepath.Join(s.rootDir(), "/.real/proc")
-		if err := os.MkdirAll(realProc, 0755); err != nil {
-			return err
-		}
-
-		if err := unix.Mount("proc", realProc, f.fstype, uintptr(f.flags), f.opts); err != nil {
-			return fmt.Errorf("mount fstype=%q, src=%q, dest=%q: error: %w", f.fstype, "proc", realProc, err)
-		}
-
-		targetPath := filepath.Join(s.rootDir(), "/proc")
-		if err := os.MkdirAll(targetPath, 0755); err != nil {
-			return err
-		}
-
-		ps, err := procfs.Mount(targetPath, &procfs.Options{
-			RealProcPath: realProc,
-		})
-
-		if err := ps.WaitMount(); err != nil {
-			return err
-		}
-
-		return err
-	}()
-	return s.lastError
-}
-
 func (s *Sandbox) bind(f *fsType, target, source string) error {
 	if s.lastError != nil {
 		return fmt.Errorf("previous error %w", s.lastError)
@@ -337,12 +313,24 @@ func (s *Sandbox) startProxy(responder func(fdchan.Message) error) error {
 }
 
 func (s *Sandbox) run() error {
+	runtime.LockOSThread()
+
 	child, err := fdchan.NewChild()
 	if err != nil {
 		return err
 	}
 
+	slog.Debug("fdchan child", "child", child)
+
+	if err := unix.Mount("tmpfs", s.rootDir(), "tmpfs", 0, ""); err != nil {
+		return fmt.Errorf("mount tmpfs to %q: %w", s.rootDir(), err)
+	}
+
+	s.mount(fsDev, "dev", "dev")
+	s.bind(fsBindRO, "/dev/null", "/dev/null")
+
 	complete := false
+	procfsMounted := false
 	for !complete {
 		req, responder, err := child.HandleRequest()
 		if err != nil {
@@ -360,6 +348,15 @@ func (s *Sandbox) run() error {
 			if err := s.startProxy(responder); err != nil {
 				return err
 			}
+		case "mount-procfs":
+			if err := s.startFakeProcFS(responder); err != nil {
+				return err
+			}
+			procfsMounted = true
+		case "seccomp-filter":
+			if err := s.setupSyscallFilter(responder); err != nil {
+				return err
+			}
 		case "complete":
 			complete = true
 			resp := fdchan.Message{Data: []byte("completed")}
@@ -371,14 +368,11 @@ func (s *Sandbox) run() error {
 		}
 	}
 
-	if err := unix.Mount("tmpfs", s.rootDir(), "tmpfs", 0, ""); err != nil {
-		return fmt.Errorf("mount tmpfs to %q: %w", s.rootDir(), err)
-	}
-
 	s.setHostname()
-	s.mount(fsProc, "proc", "proc")
+	if !procfsMounted {
+		s.mount(fsProc, "proc", "proc")
+	}
 	s.mount(fsCgroup2, "cgroup2", "sys/fs/cgroup")
-	s.mount(fsDev, "dev", "dev")
 	s.mount(fsDevPts, "devpts", "dev/pts")
 	s.mount(fsTmpfs, "tmpfs", "tmp")
 	for _, p := range s.config.Payload {
@@ -455,6 +449,12 @@ func (s *Sandbox) sandboxProxyListener(control *fdchan.Parent) error {
 
 // Run bootstraps and runs a sandbox
 func (s *Sandbox) Run() error {
+	if s.config.Features.DebugLog {
+		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+			Level: slog.LevelDebug,
+		})))
+	}
+
 	ck, err := writeCookie(s.config)
 	if err != nil {
 		return err
@@ -504,6 +504,18 @@ func (s *Sandbox) Run() error {
 		return err
 	}
 
+	if s.config.Features.FakeProcFS {
+		if err := s.startFakeProcServer(control); err != nil {
+			return fmt.Errorf("s.startFakeProc error %w", err)
+		}
+	}
+
+	if s.config.Features.SyscallFilter {
+		if err := s.startSyscallFilter(control); err != nil {
+			return fmt.Errorf("s.startFakeProc error %w", err)
+		}
+	}
+
 	resp, err := control.Request(fdchan.Message{Data: []byte("complete")})
 	if err != nil {
 		return err
@@ -538,13 +550,18 @@ func Init(args ...string) error {
 	}
 
 	u := &Sandbox{config: c}
+	if u.config.Features.DebugLog {
+		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+			Level: slog.LevelDebug,
+		})))
+	}
 	return u.run()
 }
 
 // MustInit is Init, except it exits instead of returning an error
 func MustInit() {
 	if err := Init(os.Args...); err != nil {
-		fmt.Fprintf(os.Stderr, "sandbox.MustInit error %#v\n", err)
+		fmt.Fprintf(os.Stderr, "sandbox.MustInit error %s\n", err.Error())
 		os.Exit(2)
 	}
 }

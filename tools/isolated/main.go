@@ -14,11 +14,15 @@ func main() {
 		Version:   "v1",
 		Hostname:  "sandbox",
 		MachineID: "32e825d5701d11f08f966c02e06b743e",
-		Command:   []string{"/usr/bin/busybox", "sh"},
+		Command:   append([]string{"/usr/bin/busybox"}, os.Args[1:]...),
 		IPAddress: "10.0.0.1",
 		Env:       []string{},
 		Payload: []sandbox.Payload{
 			{Target: "/usr/bin/busybox", Source: sandbox.PayloadSource{Type: "bind", Value: "/usr/bin/busybox"}},
+		},
+		Features: sandbox.Features{
+			SyscallFilter: true,
+			DebugLog:      true,
 		},
 	}
 

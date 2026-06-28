@@ -180,8 +180,6 @@ func (c *Node) sandboxConfig() (*sandbox.Config, error) {
 
 			{Target: "/usr/bin/mount", FileMode: 0755, Source: sandbox.PayloadSource{Type: "write", Value: "#!/usr/bin/breakbulk mount\n"}},
 
-			{Target: "/dev/null", Source: sandbox.PayloadSource{Type: "bind", Value: "/dev/null"}},
-
 			{Target: "/sys/devices/system/cpu/online", Source: sandbox.PayloadSource{Type: "write", Value: "0-0"}},
 			{Target: "/sys/devices/system/node/node0/cpulist", Source: sandbox.PayloadSource{Type: "write", Value: "0-0"}},
 			{Target: "/sys/devices/system/node/node0/meminfo", Source: sandbox.PayloadSource{Type: "write", Value: "Node 0 MemTotal:       1 kB"}},
