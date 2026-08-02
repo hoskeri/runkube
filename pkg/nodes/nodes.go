@@ -189,6 +189,7 @@ func (c *Node) sandboxConfig() (*sandbox.Config, error) {
 		},
 		Features: sandbox.Features{
 			SyscallFilter: true,
+			DebugLog:      true,
 		},
 	}, nil
 }

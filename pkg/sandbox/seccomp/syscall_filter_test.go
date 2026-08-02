@@ -15,15 +15,17 @@ const (
 	envVarTestChild = "GO_WANT_SECCOMP_TEST_CHILD"
 
 	// Mock virtual paths for our test assertions
-	mockOpenPath   = "/mock/open_file"
-	mockStatPath   = "/mock/stat_file"
-	mockStatxPath  = "/mock/statx_file"
-	mockStatfsPath = "/mock/statfs_file"
+	mockOpenPath     = "/mock/open_file"
+	mockStatPath     = "/mock/stat_file"
+	mockStatxPath    = "/mock/statx_file"
+	mockStatfsPath   = "/mock/statfs_file"
+	mockReadlinkPath = "/mock/readlink_file"
 
-	mockOpenContent = "dynamic seccomp spoofed payload!"
-	mockStatIno     = 12345
-	mockStatxIno    = 54321
-	mockStatfsType  = 0x1337BEEF
+	mockOpenContent    = "dynamic seccomp spoofed payload!"
+	mockStatIno        = 12345
+	mockStatxIno       = 54321
+	mockStatfsType     = 0x1337BEEF
+	mockReadlinkTarget = "/mock/symlink_target"
 )
 
 // TestSuperviseCallbacks validates the end-to-end interception and spoofing of all
@@ -105,12 +107,19 @@ func TestSuperviseCallbacks(t *testing.T) {
 			}
 			return nil, nil
 		},
+		ReadlinkCallback: func(pid uint32, path string) (*string, error) {
+			if path == mockReadlinkPath {
+				target := mockReadlinkTarget
+				return &target, nil
+			}
+			return nil, nil
+		},
 	}
 
 	// 4. Run the supervisor loop in the background
 	errChan := make(chan error, 1)
 	go func() {
-		errChan <- Supervise(listenerFd, config)
+		errChan <- Supervise(os.NewFile(uintptr(listenerFd), ""), config)
 	}()
 
 	// Signal the child that our supervisor loop is active and waiting
@@ -215,6 +224,18 @@ func runTestChild() {
 		os.Exit(1)
 	}
 	slog.Debug("Child successfully validated statfs callback spoofing")
+
+	// --- ASSERTION 5: Verify Readlink Interception ---
+	targetPath, err := os.Readlink(mockReadlinkPath)
+	if err != nil {
+		slog.Error("Child readlink system call failed", "path", mockReadlinkPath, "error", err)
+		os.Exit(1)
+	}
+	if targetPath != mockReadlinkTarget {
+		slog.Error("Readlink verification failed: Target mismatch", "expected", mockReadlinkTarget, "got", targetPath)
+		os.Exit(1)
+	}
+	slog.Debug("Child successfully validated readlink callback spoofing")
 
 	os.Exit(0)
 }

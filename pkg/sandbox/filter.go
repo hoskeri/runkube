@@ -48,7 +48,8 @@ func (s *Sandbox) startSyscallFilter(control *fdchan.Parent) error {
 
 	go func() {
 		filterFD := seccompFilterFD
-		if err := seccomp.Supervise(int(filterFD.Fd()), seccomp.SupervisorConfig{}); err != nil {
+		// prevent filterFD from getting garbage collected.
+		if err := seccomp.Supervise(filterFD, s.supervisorConfig()); err != nil {
 			panic(err.Error())
 		}
 	}()

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"runtime"
 	"unsafe"
@@ -55,6 +56,9 @@ type SupervisorConfig struct {
 
 	// StatfsCallback handles filesystem queries (e.g. statfs translations). Return nil, nil to pass-through.
 	StatfsCallback func(pid uint32, path string) (*unix.Statfs_t, error)
+
+	// ReadlinkCallback handles readlink and readlinkat queries. Return (*target, nil) to spoof, or (nil, nil) to pass-through.
+	ReadlinkCallback func(pid uint32, path string) (*string, error)
 }
 
 type syscallMetadata struct {
@@ -70,11 +74,13 @@ var syscallRegistry = map[int32]syscallMetadata{
 	unix.SYS_NEWFSTATAT: {name: "newfstatat", pathArgIdx: 1, handler: handleStatFamily},
 	unix.SYS_STATX:      {name: "statx", pathArgIdx: 1, handler: handleStatxFamily},
 	unix.SYS_STATFS:     {name: "statfs", pathArgIdx: 0, handler: handleStatfsFamily},
+	unix.SYS_READLINK:   {name: "readlink", pathArgIdx: 0, handler: handleReadlinkFamily},
+	unix.SYS_READLINKAT: {name: "readlinkat", pathArgIdx: 1, handler: handleReadlinkFamily},
 }
 
 // InstallFilter configures PR_SET_NO_NEW_PRIVS and loads the Seccomp filter
-// targeting file open (open/openat/openat2), stat (newfstatat/statx), and file system stat (statfs)
-// with SECCOMP_RET_USER_NOTIF.
+// targeting file open (open/openat/openat2), stat (newfstatat/statx), file system stat (statfs),
+// and readlink (readlink/readlinkat) with SECCOMP_RET_USER_NOTIF.
 func InstallFilter() (int, error) {
 	slog.Debug("installing seccomp filter in child")
 
@@ -87,18 +93,22 @@ func InstallFilter() (int, error) {
 	filter := []unix.SockFilter{
 		// Load Syscall Number (Offset 0 of seccomp_data struct)
 		{Code: unix.BPF_LD + unix.BPF_W + unix.BPF_ABS, K: 0},
-		// Check SYS_OPEN (jump 5 instructions on match)
-		{Code: unix.BPF_JMP + unix.BPF_JEQ + unix.BPF_K, K: uint32(unix.SYS_OPEN), Jt: 5, Jf: 0},
-		// Check SYS_OPENAT (jump 4 instructions on match)
-		{Code: unix.BPF_JMP + unix.BPF_JEQ + unix.BPF_K, K: uint32(unix.SYS_OPENAT), Jt: 4, Jf: 0},
-		// Check SYS_OPENAT2 (jump 3 instructions on match)
-		{Code: unix.BPF_JMP + unix.BPF_JEQ + unix.BPF_K, K: uint32(unix.SYS_OPENAT2), Jt: 3, Jf: 0},
-		// Check SYS_NEWFSTATAT (jump 2 instructions on match)
-		{Code: unix.BPF_JMP + unix.BPF_JEQ + unix.BPF_K, K: uint32(unix.SYS_NEWFSTATAT), Jt: 2, Jf: 0},
-		// Check SYS_STATX (jump 1 instruction on match)
-		{Code: unix.BPF_JMP + unix.BPF_JEQ + unix.BPF_K, K: uint32(unix.SYS_STATX), Jt: 1, Jf: 0},
-		// Check SYS_STATFS (match executes next, else jump to allow)
-		{Code: unix.BPF_JMP + unix.BPF_JEQ + unix.BPF_K, K: uint32(unix.SYS_STATFS), Jt: 0, Jf: 1},
+		// Check SYS_OPEN (jump 7 instructions on match)
+		{Code: unix.BPF_JMP + unix.BPF_JEQ + unix.BPF_K, K: uint32(unix.SYS_OPEN), Jt: 7, Jf: 0},
+		// Check SYS_OPENAT (jump 6 instructions on match)
+		{Code: unix.BPF_JMP + unix.BPF_JEQ + unix.BPF_K, K: uint32(unix.SYS_OPENAT), Jt: 6, Jf: 0},
+		// Check SYS_OPENAT2 (jump 5 instructions on match)
+		{Code: unix.BPF_JMP + unix.BPF_JEQ + unix.BPF_K, K: uint32(unix.SYS_OPENAT2), Jt: 5, Jf: 0},
+		// Check SYS_NEWFSTATAT (jump 4 instructions on match)
+		{Code: unix.BPF_JMP + unix.BPF_JEQ + unix.BPF_K, K: uint32(unix.SYS_NEWFSTATAT), Jt: 4, Jf: 0},
+		// Check SYS_STATX (jump 3 instructions on match)
+		{Code: unix.BPF_JMP + unix.BPF_JEQ + unix.BPF_K, K: uint32(unix.SYS_STATX), Jt: 3, Jf: 0},
+		// Check SYS_STATFS (jump 2 instructions on match)
+		{Code: unix.BPF_JMP + unix.BPF_JEQ + unix.BPF_K, K: uint32(unix.SYS_STATFS), Jt: 2, Jf: 0},
+		// Check SYS_READLINK (jump 1 instruction on match)
+		{Code: unix.BPF_JMP + unix.BPF_JEQ + unix.BPF_K, K: uint32(unix.SYS_READLINK), Jt: 1, Jf: 0},
+		// Check SYS_READLINKAT (match executes next, else jump to allow)
+		{Code: unix.BPF_JMP + unix.BPF_JEQ + unix.BPF_K, K: uint32(unix.SYS_READLINKAT), Jt: 0, Jf: 1},
 		// Match: Dispatch to Seccomp User Notifier listener
 		{Code: unix.BPF_RET + unix.BPF_K, K: unix.SECCOMP_RET_USER_NOTIF},
 		// No Match: Allow syscall execution
@@ -128,14 +138,16 @@ func InstallFilter() (int, error) {
 // Supervise runs the parent supervisor loop. It blocks, listening for file operations
 // on the listenerFd, reads memory via process_vm_readv(2), and delegates processing to
 // highly focused specialized syscall handlers.
-func Supervise(dupFd int, config SupervisorConfig) error {
-	slog.Debug("supervisor loop started", "listener_fd", dupFd)
+func Supervise(lfd *os.File, config SupervisorConfig) error {
+	defer runtime.KeepAlive(lfd)
+	defer lfd.Close()
 
-	defer unix.Close(dupFd)
+	listenerFd := int(lfd.Fd())
+	slog.Debug("supervisor loop started", "listener_fd", listenerFd)
 
 	for {
 		var req seccompNotif
-		err := ioctl(dupFd, unix.SECCOMP_IOCTL_NOTIF_RECV, unsafe.Pointer(&req))
+		err := ioctl(listenerFd, unix.SECCOMP_IOCTL_NOTIF_RECV, unsafe.Pointer(&req))
 		if err != nil {
 			if err == unix.EINTR {
 				continue
@@ -158,7 +170,7 @@ func Supervise(dupFd int, config SupervisorConfig) error {
 		meta, registered := syscallRegistry[req.Data.Nr]
 		if !registered {
 			slog.Debug("unexpected syscall number in supervisor", "nr", req.Data.Nr)
-			_ = continueNoop(dupFd, req.Id)
+			_ = continueNoop(listenerFd, req.Id)
 			continue
 		}
 
@@ -167,7 +179,7 @@ func Supervise(dupFd int, config SupervisorConfig) error {
 		path, err := readStringFromProcess(req.Pid, pathAddr)
 		if err != nil {
 			slog.Debug("failed to read path from child memory (process likely terminated)", "pid", req.Pid, "error", err)
-			_ = continueNoop(dupFd, req.Id)
+			_ = continueNoop(listenerFd, req.Id)
 			continue
 		}
 
@@ -175,7 +187,7 @@ func Supervise(dupFd int, config SupervisorConfig) error {
 		slog.Debug("intercepted syscall in child", "pid", req.Pid, "syscall", meta.name, "path", cleanPath)
 
 		// Dispatch to target handler
-		handled, handlerErr := meta.handler(dupFd, &req, cleanPath, &config)
+		handled, handlerErr := meta.handler(listenerFd, &req, cleanPath, &config)
 		if handlerErr != nil {
 			slog.Error("handler execution failed", "syscall", meta.name, "path", cleanPath, "error", handlerErr)
 		}
@@ -183,7 +195,7 @@ func Supervise(dupFd int, config SupervisorConfig) error {
 		// Fall back to native execution if the handler declined or skipped spoofing
 		if !handled {
 			slog.Debug("no match found; executing passthrough", "path", cleanPath)
-			err = continueNoop(dupFd, req.Id)
+			err = continueNoop(listenerFd, req.Id)
 			if err != nil && errors.Is(err, unix.ENOENT) {
 				slog.Debug("continueNoop failed: notification expired or syscall interrupted", "id", req.Id)
 			}
@@ -313,6 +325,41 @@ func handleStatfsFamily(dupFd int, req *seccompNotif, path string, config *Super
 	}
 
 	return true, continueSuccess(dupFd, req.Id, 0)
+}
+
+func handleReadlinkFamily(dupFd int, req *seccompNotif, path string, config *SupervisorConfig) (bool, error) {
+	if config.ReadlinkCallback == nil {
+		return false, nil
+	}
+
+	target, err := config.ReadlinkCallback(req.Pid, path)
+	if err != nil {
+		return true, handleCallbackError(dupFd, req.Id, err)
+	}
+	if target == nil {
+		return false, nil
+	}
+
+	bufAddr := req.Data.Args[1]
+	bufSize := req.Data.Args[2]
+	if req.Data.Nr == unix.SYS_READLINKAT {
+		bufAddr = req.Data.Args[2]
+		bufSize = req.Data.Args[3]
+	}
+
+	targetBytes := []byte(*target)
+	if uint64(len(targetBytes)) > bufSize {
+		targetBytes = targetBytes[:bufSize]
+	}
+
+	if len(targetBytes) > 0 {
+		if writeErr := writeToProcess(req.Pid, bufAddr, targetBytes); writeErr != nil {
+			_ = continueError(dupFd, req.Id, unix.EFAULT)
+			return true, fmt.Errorf("failed to write readlink target to child: %w", writeErr)
+		}
+	}
+
+	return true, continueSuccess(dupFd, req.Id, int64(len(targetBytes)))
 }
 
 func continueNoop(listenerFd int, reqId uint64) error {
