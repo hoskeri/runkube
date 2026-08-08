@@ -16,17 +16,18 @@ var staticSwaps = `
 Filename				Type		Size		Used		Priority
 `
 
-func (s *Sandbox) supervisorConfig() seccomp.SupervisorConfig {
-	return seccomp.SupervisorConfig{
-		OpenCallback: func(_ uint32, p string) (*string, error) {
-			switch p {
-			case "/proc/mounts":
-				return &staticMountData, nil
-			case "/proc/swaps":
-				return &staticSwaps, nil
-			default:
-				return nil, nil
-			}
-		},
-	}
+func (s *Sandbox) supervisorConfig() (seccomp.Filter, seccomp.SupervisorConfig) {
+	mux := seccomp.NewMux()
+
+	// Static file spoofing
+	mux.Handle("OPEN", "/proc/mounts", seccomp.SpoofFile(staticMountData))
+	mux.Handle("OPEN", "/proc/swaps", seccomp.SpoofFile(staticSwaps))
+
+	// Catch-all passthrough (optional - implicit if no match)
+	mux.Handle("OPEN", "*", seccomp.PassThrough())
+
+	// Middleware
+	mux.Use(seccomp.LoggingMiddleware())
+
+	return mux.Build()
 }

@@ -1,6 +1,7 @@
 package seccomp
 
 import (
+	"encoding/base64"
 	"fmt"
 	"io"
 	"log/slog"
@@ -14,7 +15,6 @@ import (
 const (
 	envVarTestChild = "GO_WANT_SECCOMP_TEST_CHILD"
 
-	// Mock virtual paths for our test assertions
 	mockOpenPath     = "/mock/open_file"
 	mockStatPath     = "/mock/stat_file"
 	mockStatxPath    = "/mock/statx_file"
@@ -28,11 +28,34 @@ const (
 	mockReadlinkTarget = "/mock/symlink_target"
 )
 
+// buildTestMux constructs the mux with all mock routes for the end-to-end test
+func buildTestMux() (Filter, SupervisorConfig) {
+	mux := NewMux()
+
+	mux.Handle("OPEN", mockOpenPath, SpoofFile(mockOpenContent))
+	mux.Handle("STAT", mockStatPath, SpoofStat(&unix.Stat_t{
+		Ino:  mockStatIno,
+		Mode: unix.S_IFREG | 0644,
+		Size: int64(len(mockOpenContent)),
+	}))
+	mux.Handle("STATX", mockStatxPath, SpoofStat(&unix.Statx_t{
+		Mask: unix.STATX_BASIC_STATS,
+		Ino:  mockStatxIno,
+		Mode: unix.S_IFREG | 0755,
+	}))
+	mux.Handle("STATFS", mockStatfsPath, SpoofStat(&unix.Statfs_t{
+		Type: mockStatfsType,
+	}))
+	mux.Handle("READLINK", mockReadlinkPath, SpoofReadlink(mockReadlinkTarget))
+
+	return mux.Build()
+}
+
 // TestSuperviseCallbacks validates the end-to-end interception and spoofing of all
-// registered system calls using our SupervisorConfig callback API.
+// registered system calls through the Mux-based API.
 func TestSuperviseCallbacks(t *testing.T) {
 	if os.Getenv(envVarTestChild) == "1" {
-		runTestChild()
+		runTestChild(t)
 		return
 	}
 
@@ -44,13 +67,21 @@ func TestSuperviseCallbacks(t *testing.T) {
 	parentSock := fds[0]
 	childSock := fds[1]
 
-	// 2. Spawn the child process targeting this same test runner
-	cmd := exec.Command(os.Args[0], "-test.run=TestSuperviseCallbacks")
+	// 2. Build the filter + config
+	filter, config := buildTestMux()
+	filterBytes, err := filter.MarshalBinary()
+	if err != nil {
+		t.Fatalf("Failed to marshal filter: %v", err)
+	}
+
+	// 3. Spawn the child process targeting this same test runner
+	cmd := exec.Command(os.Args[0], "-test.v", "-test.run=TestSuperviseCallbacks")
 	cmd.Env = append(os.Environ(), fmt.Sprintf("%s=1", envVarTestChild))
+	// Pass the filter bytes through the environment (base64) - the child installs them
+	cmd.Env = append(cmd.Env, testChildFilterEnv+"="+base64.StdEncoding.EncodeToString(filterBytes))
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
-	// Wrap the child socket in os.File and pass it to ExtraFiles
 	childFile := os.NewFile(uintptr(childSock), "child_sock")
 	cmd.ExtraFiles = []*os.File{childFile}
 
@@ -70,53 +101,7 @@ func TestSuperviseCallbacks(t *testing.T) {
 	}
 	defer unix.Close(listenerFd)
 
-	// 3. Configure the supervisor callbacks
-	config := SupervisorConfig{
-		OpenCallback: func(pid uint32, path string) (*string, error) {
-			if path == mockOpenPath {
-				content := mockOpenContent
-				return &content, nil
-			}
-			return nil, nil // Let other paths pass through naturally
-		},
-		StatCallback: func(pid uint32, path string) (*unix.Stat_t, error) {
-			if path == mockStatPath {
-				return &unix.Stat_t{
-					Ino:  mockStatIno,
-					Mode: unix.S_IFREG | 0644,
-					Size: int64(len(mockOpenContent)),
-				}, nil
-			}
-			return nil, nil
-		},
-		StatxCallback: func(pid uint32, path string) (*unix.Statx_t, error) {
-			if path == mockStatxPath {
-				var statx unix.Statx_t
-				statx.Mask = unix.STATX_BASIC_STATS
-				statx.Ino = mockStatxIno
-				statx.Mode = unix.S_IFREG | 0755
-				return &statx, nil
-			}
-			return nil, nil
-		},
-		StatfsCallback: func(pid uint32, path string) (*unix.Statfs_t, error) {
-			if path == mockStatfsPath {
-				return &unix.Statfs_t{
-					Type: mockStatfsType,
-				}, nil
-			}
-			return nil, nil
-		},
-		ReadlinkCallback: func(pid uint32, path string) (*string, error) {
-			if path == mockReadlinkPath {
-				target := mockReadlinkTarget
-				return &target, nil
-			}
-			return nil, nil
-		},
-	}
-
-	// 4. Run the supervisor loop in the background
+	// 4. Run the supervisor loop in the background using the config
 	errChan := make(chan error, 1)
 	go func() {
 		errChan <- Supervise(os.NewFile(uintptr(listenerFd), ""), config)
@@ -133,9 +118,7 @@ func TestSuperviseCallbacks(t *testing.T) {
 		t.Fatalf("Child process returned with an error: %v", err)
 	}
 
-	// Stop supervisor loop by closing the listener FD.
-	// Since we no longer leak duplicated FDs in Supervise, this close triggers
-	// an immediate EBADF on the RECV ioctl, cleanly terminating the loop.
+	// Stop supervisor loop by closing the listener FD
 	_ = unix.Close(listenerFd)
 	if superviseErr := <-errChan; superviseErr != nil {
 		t.Logf("Supervisor exited: %v", superviseErr)
@@ -143,11 +126,25 @@ func TestSuperviseCallbacks(t *testing.T) {
 }
 
 // runTestChild is executed by the spawned child process to run individual system call assertions.
-func runTestChild() {
+func runTestChild(t *testing.T) {
 	parentSock := 3 // Inherited socketpair FD
 
+	// Re-parse the filter from the environment
+	encFilter, err := base64.StdEncoding.DecodeString(os.Getenv(testChildFilterEnv))
+	if err != nil {
+		slog.Error("Child failed to decode filter env", "error", err)
+		os.Exit(1)
+	}
+
+	_, err = ParseFilter(encFilter)
+
+	if err != nil {
+		slog.Error("Child failed to parse filter", "error", err)
+		os.Exit(1)
+	}
+
 	// 1. Install Seccomp notify filter on this single thread
-	listenerFd, err := InstallFilter()
+	listenerFd, err := InstallFilter(nil)
 	if err != nil {
 		slog.Error("Child failed to install seccomp filter", "error", err)
 		os.Exit(1)
@@ -244,12 +241,13 @@ func runTestChild() {
 
 func sendFD(socket int, fd int) error {
 	rights := unix.UnixRights(fd)
-	return unix.Sendmsg(socket, nil, rights, nil, 0)
+	return unix.Sendmsg(socket, []byte{1}, rights, nil, 0)
 }
 
 func recvFD(socket int) (int, error) {
 	oob := make([]byte, unix.CmsgSpace(4))
-	_, oobn, _, _, err := unix.Recvmsg(socket, nil, oob, 0)
+	var b []byte
+	_, oobn, _, _, err := unix.Recvmsg(socket, b, oob, 0)
 	if err != nil {
 		return -1, err
 	}
@@ -269,3 +267,5 @@ func recvFD(socket int) (int, error) {
 	}
 	return fds[0], nil
 }
+
+const testChildFilterEnv = "GO_SECCOMP_TEST_FILTER"

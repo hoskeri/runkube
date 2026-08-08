@@ -61,7 +61,6 @@ type Payload struct {
 }
 
 type Features struct {
-	FakeProcFS    bool `json:"fakeProcFS"`
 	SyscallFilter bool `json:"syscallFilter"`
 	DebugLog      bool `json:"debugLog"`
 }
@@ -330,7 +329,6 @@ func (s *Sandbox) run() error {
 	s.bind(fsBindRO, "/dev/null", "/dev/null")
 
 	complete := false
-	procfsMounted := false
 	for !complete {
 		req, responder, err := child.HandleRequest()
 		if err != nil {
@@ -348,13 +346,8 @@ func (s *Sandbox) run() error {
 			if err := s.startProxy(responder); err != nil {
 				return err
 			}
-		case "mount-procfs":
-			if err := s.startFakeProcFS(responder); err != nil {
-				return err
-			}
-			procfsMounted = true
 		case "seccomp-filter":
-			if err := s.setupSyscallFilter(responder); err != nil {
+			if err := s.setupSyscallFilter(req, responder); err != nil {
 				return err
 			}
 		case "complete":
@@ -369,9 +362,7 @@ func (s *Sandbox) run() error {
 	}
 
 	s.setHostname()
-	if !procfsMounted {
-		s.mount(fsProc, "proc", "proc")
-	}
+	s.mount(fsProc, "proc", "proc")
 	s.mount(fsCgroup2, "cgroup2", "sys/fs/cgroup")
 	s.mount(fsDevPts, "devpts", "dev/pts")
 	s.mount(fsTmpfs, "tmpfs", "tmp")
@@ -502,12 +493,6 @@ func (s *Sandbox) Run() error {
 
 	if err := s.sandboxProxyListener(control); err != nil {
 		return err
-	}
-
-	if s.config.Features.FakeProcFS {
-		if err := s.startFakeProcServer(control); err != nil {
-			return fmt.Errorf("s.startFakeProc error %w", err)
-		}
 	}
 
 	if s.config.Features.SyscallFilter {
