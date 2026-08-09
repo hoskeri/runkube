@@ -5,7 +5,6 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/hoskeri/runkube/pkg/sandbox/seccomp/filter"
 	"github.com/hoskeri/runkube/pkg/sandbox/seccomp/internal"
 )
 
@@ -42,6 +41,12 @@ func (f *fakeResponder) SpoofReadlink(addr uint64, target string, bufSize uint64
 	f.readSz = bufSize
 	return nil
 }
+func (f *fakeResponder) SpoofUname(addr uint64, uts *unix.Utsname) error {
+	f.action = "spoof_uname"
+	f.statAddr = addr
+	f.statVal = uts
+	return nil
+}
 func (f *fakeResponder) Success(ret int64) error { f.action = "success"; f.retVal = ret; return nil }
 
 func TestMuxExactMatch(t *testing.T) {
@@ -49,12 +54,7 @@ func TestMuxExactMatch(t *testing.T) {
 	content := "fake data"
 	mux.Handle("OPEN", "/proc/mounts", SpoofFile(content))
 
-	filter, config := mux.Build()
-
-	// Verify filter intercepts OPEN family
-	if len(filter) == 0 {
-		t.Fatal("expected non-empty filter")
-	}
+	config := mux.Build()
 
 	// Dispatch a matching request
 	resp := &fakeResponder{}
@@ -77,7 +77,7 @@ func TestMuxNoMatchContinues(t *testing.T) {
 	mux := NewMux()
 	mux.Handle("OPEN", "/proc/mounts", SpoofFile("fake"))
 
-	_, config := mux.Build()
+	config := mux.Build()
 
 	resp := &fakeResponder{}
 	ctx := &internal.Context{
@@ -97,7 +97,7 @@ func TestMuxPrefixMatch(t *testing.T) {
 	mux := NewMux()
 	mux.HandlePrefix("OPEN", "/fake", SpoofFile("prefix-content"))
 
-	_, config := mux.Build()
+	config := mux.Build()
 
 	resp := &fakeResponder{}
 	ctx := &internal.Context{
@@ -117,7 +117,7 @@ func TestMuxCatchAll(t *testing.T) {
 	mux := NewMux()
 	mux.Handle("OPEN", "*", SpoofFile("catch-all"))
 
-	_, config := mux.Build()
+	config := mux.Build()
 
 	resp := &fakeResponder{}
 	ctx := &internal.Context{
@@ -138,7 +138,7 @@ func TestMuxWildcardAndStaticCoexist(t *testing.T) {
 	mux.Handle("OPEN", "/proc/mounts", SpoofFile("mounts"))
 	mux.Handle("OPEN", "*", SpoofFile("other"))
 
-	_, config := mux.Build()
+	config := mux.Build()
 
 	// Static path should match exact route
 	resp1 := &fakeResponder{}
@@ -161,7 +161,7 @@ func TestSpoofStatHandlesAllMethods(t *testing.T) {
 	// STAT method (newfstatat: arg[2] = statbuf)
 	mux := NewMux()
 	mux.Handle("STAT", "/fake/stat", SpoofStat(stat))
-	_, config := mux.Build()
+	config := mux.Build()
 
 	resp := &fakeResponder{}
 	ctx := &internal.Context{
@@ -178,6 +178,45 @@ func TestSpoofStatHandlesAllMethods(t *testing.T) {
 	}
 	if resp.statAddr != 0xDEAD {
 		t.Errorf("expected stat addr 0xDEAD, got %#x", resp.statAddr)
+	}
+}
+
+func TestSpoofUnameDispatch(t *testing.T) {
+	uts := &unix.Utsname{Sysname: [65]byte{}}
+	copy(uts.Sysname[:], "runkube")
+	copy(uts.Release[:], "6.6.0-spoofed")
+
+	mux := NewMux()
+	mux.Handle("UNAME", "*", SpoofUname(uts))
+	config := mux.Build()
+
+	resp := &fakeResponder{}
+	ctx := &internal.Context{
+		Syscall: unix.SYS_UNAME,
+		Method:  "UNAME",
+		Path:    "",
+		Args:    [6]uint64{0xBEEF, 0, 0, 0, 0, 0},
+		Respond: resp,
+	}
+	config.HandlerRegistry.Dispatch(ctx)
+
+	if resp.action != "spoof_uname" {
+		t.Errorf("expected spoof_uname, got %q", resp.action)
+	}
+	if resp.statAddr != 0xBEEF {
+		t.Errorf("expected uname buf addr 0xBEEF, got %#x", resp.statAddr)
+	}
+	// No path required: handler must run even with an empty path
+	ctx2 := &internal.Context{
+		Syscall: unix.SYS_UNAME,
+		Method:  "UNAME",
+		Args:    [6]uint64{0xCAFE, 0, 0, 0, 0, 0},
+		Respond: resp,
+	}
+	resp.action = ""
+	config.HandlerRegistry.Dispatch(ctx2)
+	if resp.action != "spoof_uname" {
+		t.Errorf("expected spoof_uname without path, got %q", resp.action)
 	}
 }
 
@@ -199,55 +238,5 @@ func TestChainFirstResponderWins(t *testing.T) {
 	// First handler did nothing (didn't respond), second should handle
 	if resp.action != "spoof_fd" {
 		t.Errorf("expected second handler to spoof fd, got %q", resp.action)
-	}
-}
-
-func TestFilterMarshalRoundTrip(t *testing.T) {
-	mux := NewMux()
-	mux.Handle("OPEN", "/proc/mounts", SpoofFile("data"))
-	mux.Handle("STAT", "/fake/stat", SpoofStat(&unix.Stat_t{}))
-	filter, _ := mux.Build()
-
-	data, err := filter.MarshalBinary()
-	if err != nil {
-		t.Fatalf("marshal failed: %v", err)
-	}
-
-	parsed, err := ParseFilter(data)
-	if err != nil {
-		t.Fatalf("parse failed: %v", err)
-	}
-
-	if len(parsed) != len(filter) {
-		t.Errorf("length mismatch: got %d, want %d", len(parsed), len(filter))
-	}
-
-	for i := range filter {
-		if filter[i] != parsed[i] {
-			t.Errorf("filter[%d] mismatch: got %+v, want %+v", i, parsed[i], filter[i])
-		}
-	}
-}
-
-func TestFilterBuilderDedup(t *testing.T) {
-	mux := NewMux()
-	// Same method registered twice with different paths
-	mux.Handle("OPEN", "/a", SpoofFile("a"))
-	mux.Handle("OPEN", "/b", SpoofFile("b"))
-
-	filter, _ := mux.Build()
-
-	// OPEN family = 3 syscalls, should appear once each in the filter
-	// Filter structure: LD + 3x JEQ + RET_USER_NOTIF + RET_ALLOW = 6 instructions
-	if len(filter) != 6 {
-		t.Errorf("expected 6 filter instructions (3 syscalls deduped), got %d", len(filter))
-	}
-}
-
-func TestFilterBuilderInvalid(t *testing.T) {
-	builder := filter.NewFilterBuilder(nil)
-	_, err := builder.Build()
-	if err == nil {
-		t.Fatal("expected error for empty filter")
 	}
 }

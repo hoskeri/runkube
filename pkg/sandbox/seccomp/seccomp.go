@@ -15,22 +15,24 @@ import (
 var DefaultFilter = Filter{
 	// Load Syscall Number (Offset 0 of seccomp_data struct)
 	{Code: unix.BPF_LD + unix.BPF_W + unix.BPF_ABS, K: 0},
-	// Check SYS_OPEN (jump 7 instructions on match)
-	{Code: unix.BPF_JMP + unix.BPF_JEQ + unix.BPF_K, K: uint32(unix.SYS_OPEN), Jt: 7, Jf: 0},
-	// Check SYS_OPENAT (jump 6 instructions on match)
-	{Code: unix.BPF_JMP + unix.BPF_JEQ + unix.BPF_K, K: uint32(unix.SYS_OPENAT), Jt: 6, Jf: 0},
-	// Check SYS_OPENAT2 (jump 5 instructions on match)
-	{Code: unix.BPF_JMP + unix.BPF_JEQ + unix.BPF_K, K: uint32(unix.SYS_OPENAT2), Jt: 5, Jf: 0},
-	// Check SYS_NEWFSTATAT (jump 4 instructions on match)
-	{Code: unix.BPF_JMP + unix.BPF_JEQ + unix.BPF_K, K: uint32(unix.SYS_NEWFSTATAT), Jt: 4, Jf: 0},
-	// Check SYS_STATX (jump 3 instructions on match)
-	{Code: unix.BPF_JMP + unix.BPF_JEQ + unix.BPF_K, K: uint32(unix.SYS_STATX), Jt: 3, Jf: 0},
-	// Check SYS_STATFS (jump 2 instructions on match)
-	{Code: unix.BPF_JMP + unix.BPF_JEQ + unix.BPF_K, K: uint32(unix.SYS_STATFS), Jt: 2, Jf: 0},
-	// Check SYS_READLINK (jump 1 instruction on match)
-	{Code: unix.BPF_JMP + unix.BPF_JEQ + unix.BPF_K, K: uint32(unix.SYS_READLINK), Jt: 1, Jf: 0},
-	// Check SYS_READLINKAT (match executes next, else jump to allow)
-	{Code: unix.BPF_JMP + unix.BPF_JEQ + unix.BPF_K, K: uint32(unix.SYS_READLINKAT), Jt: 0, Jf: 1},
+	// Check SYS_OPEN (jump 8 instructions on match)
+	{Code: unix.BPF_JMP + unix.BPF_JEQ + unix.BPF_K, K: uint32(unix.SYS_OPEN), Jt: 8, Jf: 0},
+	// Check SYS_OPENAT (jump 7 instructions on match)
+	{Code: unix.BPF_JMP + unix.BPF_JEQ + unix.BPF_K, K: uint32(unix.SYS_OPENAT), Jt: 7, Jf: 0},
+	// Check SYS_OPENAT2 (jump 6 instructions on match)
+	{Code: unix.BPF_JMP + unix.BPF_JEQ + unix.BPF_K, K: uint32(unix.SYS_OPENAT2), Jt: 6, Jf: 0},
+	// Check SYS_NEWFSTATAT (jump 5 instructions on match)
+	{Code: unix.BPF_JMP + unix.BPF_JEQ + unix.BPF_K, K: uint32(unix.SYS_NEWFSTATAT), Jt: 5, Jf: 0},
+	// Check SYS_STATX (jump 4 instructions on match)
+	{Code: unix.BPF_JMP + unix.BPF_JEQ + unix.BPF_K, K: uint32(unix.SYS_STATX), Jt: 4, Jf: 0},
+	// Check SYS_STATFS (jump 3 instructions on match)
+	{Code: unix.BPF_JMP + unix.BPF_JEQ + unix.BPF_K, K: uint32(unix.SYS_STATFS), Jt: 3, Jf: 0},
+	// Check SYS_READLINK (jump 2 instructions on match)
+	{Code: unix.BPF_JMP + unix.BPF_JEQ + unix.BPF_K, K: uint32(unix.SYS_READLINK), Jt: 2, Jf: 0},
+	// Check SYS_READLINKAT (jump 1 instruction on match)
+	{Code: unix.BPF_JMP + unix.BPF_JEQ + unix.BPF_K, K: uint32(unix.SYS_READLINKAT), Jt: 1, Jf: 0},
+	// Check SYS_UNAME (match executes next, else jump to allow)
+	{Code: unix.BPF_JMP + unix.BPF_JEQ + unix.BPF_K, K: uint32(unix.SYS_UNAME), Jt: 0, Jf: 1},
 	// Match: Dispatch to Seccomp User Notifier listener
 	{Code: unix.BPF_RET + unix.BPF_K, K: unix.SECCOMP_RET_USER_NOTIF},
 	// No Match: Allow syscall execution
@@ -38,20 +40,17 @@ var DefaultFilter = Filter{
 }
 
 // InstallFilter configures PR_SET_NO_NEW_PRIVS and loads the Seccomp filter
-// with SECCOMP_RET_USER_NOTIF.
-func InstallFilter(f Filter) (int, error) {
+// with SECCOMP_RET_USER_NOTIF. It always installs DefaultFilter; custom
+// filter programs are not supported.
+func InstallFilter() (int, error) {
 	runtime.LockOSThread()
 	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
 		return -1, fmt.Errorf("failed to set PR_SET_NO_NEW_PRIVS: %w", err)
 	}
 
-	if len(f) == 0 {
-		f = DefaultFilter
-	}
-
 	prog := unix.SockFprog{
-		Len:    uint16(len(f)),
-		Filter: &f[0],
+		Len:    uint16(len(DefaultFilter)),
+		Filter: &DefaultFilter[0],
 	}
 
 	// Install the filter with the listener creation flag.

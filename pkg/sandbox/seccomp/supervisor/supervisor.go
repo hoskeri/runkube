@@ -84,27 +84,24 @@ func Supervise(lfd *os.File, config internal.SupervisorConfig) error {
 			continue
 		}
 
-		// Resolve path from target child process space
-		pathAddr := req.Data.Args[meta.PathArgIdx]
-		path, err := readStringFromProcess(req.Pid, pathAddr)
-		if err != nil {
-			slog.Debug("failed to read path from child memory (process likely terminated)", "pid", req.Pid, "error", err)
-			_ = continueNoop(listenerFd, req.Id)
-			continue
+		// Resolve path from target child process space (if the syscall has one).
+		// Some intercepted syscalls (e.g. uname) take no path argument.
+		cleanPath := ""
+		if meta.PathArgIdx >= 0 {
+			pathAddr := req.Data.Args[meta.PathArgIdx]
+			path, err := readStringFromProcess(req.Pid, pathAddr)
+			if err != nil {
+				slog.Debug("failed to read path from child memory (process likely terminated)", "pid", req.Pid, "error", err)
+				_ = continueNoop(listenerFd, req.Id)
+				continue
+			}
+			cleanPath = filepath.Clean(path)
 		}
-
-		cleanPath := filepath.Clean(path)
 		slog.Debug("intercepted syscall in child", "pid", req.Pid, "syscall", meta.Name, "method", meta.Method, "path", cleanPath)
 
 		// Build context
-		flagsArg := meta.FlagsArgIdx
-		if flagsArg < 0 {
-			flagsArg = 0
-		}
-		maskArg := meta.MaskArgIdx
-		if maskArg < 0 {
-			maskArg = 0
-		}
+		flagsArg := max(meta.FlagsArgIdx, 0)
+		maskArg := max(meta.MaskArgIdx, 0)
 		ctx := &internal.Context{
 			PID:     req.Pid,
 			Syscall: req.Data.Nr,
@@ -179,7 +176,7 @@ func (r *responder) SpoofStat(addr uint64, stat any) error {
 // structToBytes converts a struct to its raw byte representation using reflection
 func structToBytes(v any) ([]byte, error) {
 	rv := reflect.ValueOf(v)
-	if rv.Kind() != reflect.Ptr {
+	if rv.Kind() != reflect.Pointer {
 		return nil, fmt.Errorf("stat must be a pointer to struct, got %T", v)
 	}
 	rv = rv.Elem()
@@ -208,6 +205,19 @@ func (r *responder) SpoofReadlink(addr uint64, target string, bufSize uint64) er
 		}
 	}
 	return continueSuccess(r.lfd, r.id, int64(len(targetBytes)))
+}
+
+func (r *responder) SpoofUname(addr uint64, uts *unix.Utsname) error {
+	utsBytes, err := structToBytes(uts)
+	if err != nil {
+		_ = continueError(r.lfd, r.id, unix.EFAULT)
+		return err
+	}
+	if writeErr := writeToProcess(r.pid, addr, utsBytes); writeErr != nil {
+		_ = continueError(r.lfd, r.id, unix.EFAULT)
+		return fmt.Errorf("failed to write utsname to child: %w", writeErr)
+	}
+	return continueSuccess(r.lfd, r.id, 0)
 }
 
 func (r *responder) Success(ret int64) error {

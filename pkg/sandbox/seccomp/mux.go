@@ -37,8 +37,8 @@ func (m *Mux) SetRegistry(r *filter.Registry) *Mux {
 }
 
 // Handle registers a handler for exact syscall+path match
-// method: "OPEN", "STAT", "STATX", "STATFS", "READLINK"
-// path: exact path like "/proc/mounts" or "*" for catch-all
+// method: "OPEN", "STAT", "STATX", "STATFS", "READLINK", "UNAME"
+// path: exact path like "/proc/mounts" or "*" for catch-all (UNAME has no path, use "*")
 func (m *Mux) Handle(method, path string, h internal.Handler) *Mux {
 	m.routes = append(m.routes, route{
 		method:  method,
@@ -88,19 +88,11 @@ func (m *Mux) Use(mw internal.Middleware) *Mux {
 type SupervisorConfig = internal.SupervisorConfig
 
 // Build compiles the mux into a Filter + SupervisorConfig
-func (m *Mux) Build() (Filter, SupervisorConfig) {
-	// 1. Collect unique syscalls from routes
-	syscalls := m.collectSyscalls()
-
-	// 2. Build BPF filter
-	builder := filter.NewFilterBuilder(m.registry)
-	builder.Intercept(syscalls...)
-	bpfFilter, _ := builder.Build()
-
+func (m *Mux) Build() SupervisorConfig {
 	// 3. Build handler registry with middleware chain
 	handlerReg := m.buildHandlerRegistry()
 
-	return Filter(bpfFilter), SupervisorConfig{
+	return SupervisorConfig{
 		HandlerRegistry: handlerReg,
 		SyscallRegistry: m.registry,
 	}

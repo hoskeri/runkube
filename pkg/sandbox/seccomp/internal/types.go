@@ -38,6 +38,9 @@ type Responder interface {
 	// SpoofReadlink writes target to buffer (for READLINK)
 	SpoofReadlink(addr uint64, target string, bufSize uint64) error
 
+	// SpoofUname writes a utsname struct (for UNAME)
+	SpoofUname(addr uint64, uts *unix.Utsname) error
+
 	// Success returns a custom return value
 	Success(ret int64) error
 }
@@ -185,6 +188,11 @@ func (h *HandledResponder) SpoofReadlink(addr uint64, target string, bufSize uin
 	return h.Responder.SpoofReadlink(addr, target, bufSize)
 }
 
+func (h *HandledResponder) SpoofUname(addr uint64, uts *unix.Utsname) error {
+	h.Handled = true
+	return h.Responder.SpoofUname(addr, uts)
+}
+
 func (h *HandledResponder) Success(ret int64) error {
 	h.Handled = true
 	return h.Responder.Success(ret)
@@ -257,6 +265,12 @@ func (r *RegistryImpl) registerDefaults() {
 		Number: unix.SYS_READLINKAT, Name: "readlinkat", Method: "READLINK",
 		PathArgIdx: 1, DirFDArgIdx: 0, FlagsArgIdx: -1, MaskArgIdx: -1, ReturnType: ReturnReadlink,
 	})
+
+	// UNAME family (no path argument: arg0 is a pointer to struct utsname)
+	r.Register(SyscallMeta{
+		Number: unix.SYS_UNAME, Name: "uname", Method: "UNAME",
+		PathArgIdx: -1, DirFDArgIdx: -1, FlagsArgIdx: -1, MaskArgIdx: -1, ReturnType: ReturnUname,
+	})
 }
 
 func (r *RegistryImpl) Register(meta SyscallMeta) {
@@ -294,7 +308,7 @@ type Registry interface {
 type SyscallMeta struct {
 	Number       int32
 	Name         string
-	Method       string      // Normalized method: OPEN, STAT, STATX, STATFS, READLINK
+	Method       string      // Normalized method: OPEN, STAT, STATX, STATFS, READLINK, UNAME
 	PathArgIdx   int         // Which arg holds the path pointer (-1 if none)
 	DirFDArgIdx  int         // Which arg holds dirfd for *at syscalls (-1 if none)
 	FlagsArgIdx  int         // Which arg holds flags (for openat2, etc.)
@@ -312,6 +326,7 @@ const (
 	ReturnStatx                       // Writes to statx struct (statx)
 	ReturnStatfs                      // Writes to statfs struct (statfs)
 	ReturnReadlink                    // Writes to buffer (readlink family)
+	ReturnUname                       // Writes to utsname struct (uname)
 )
 
 // SupervisorConfig holds the configuration for the supervisor loop

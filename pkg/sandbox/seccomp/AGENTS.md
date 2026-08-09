@@ -5,7 +5,8 @@
 This package implements a **seccomp-based system call interception framework**
 using Linux's `SECCOMP_RET_USER_NOTIF` mechanism. It enables dynamic, runtime
 interception and spoofing of filesystem-related system calls (open, stat,
-statx, statfs, readlink) from a privileged supervisor process.
+statx, statfs, readlink) and identity calls (uname) from a privileged
+supervisor process.
 
 ## Architecture
 
@@ -41,6 +42,7 @@ type SupervisorConfig struct {
 | `statfs` | `handleStatfsFamily` | 0 | Write `statfs` struct to tracee memory via `process_vm_writev` |
 | `readlink` | `handleReadlinkFamily` | 0 | Write target string to tracee memory via `process_vm_writev` |
 | `readlinkat` | `handleReadlinkFamily` | 1 | Write target string to tracee memory via `process_vm_writev` |
+| `uname` | `SpoofUname` | -1 (no path; buf in arg 0) | Write `utsname` struct to tracee memory via `process_vm_writev` |
 
 ## Usage
 
@@ -90,7 +92,8 @@ func ParentProcess(listenerFd int) error {
 
 ## BPF Filter Details
 
-The filter (`InstallFilter`) uses raw `SockFilter` instructions:
+The filter (`InstallFilter`) always installs `DefaultFilter` and uses raw
+`SockFilter` instructions:
 
 ```
 1. Load syscall number (offset 0 of seccomp_data)
@@ -99,7 +102,7 @@ The filter (`InstallFilter`) uses raw `SockFilter` instructions:
 4. No match: SECCOMP_RET_ALLOW (execute normally)
 ```
 
-Target syscalls: `open`, `openat`, `openat2`, `newfstatat`, `statx`, `statfs`, `readlink`, `readlinkat`
+Target syscalls: `open`, `openat`, `openat2`, `newfstatat`, `statx`, `statfs`, `readlink`, `readlinkat`, `uname`
 
 ## Supervisor Loop (`Supervise`)
 

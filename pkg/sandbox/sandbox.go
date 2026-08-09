@@ -75,6 +75,9 @@ type Config struct {
 	Env       []string  `json:"env"`
 	Payload   []Payload `json:"payload"`
 	Features  Features  `json:"features"`
+	// System overrides the emulated hardware/resources presented through
+	// /proc, /sys and uname(2). When nil, DefaultSystem is used.
+	System *System `json:"system,omitempty"`
 }
 
 // New creates a sandbox
@@ -85,7 +88,22 @@ func New(c *Config) (*Sandbox, error) {
 // Sandbox is a configured sandbox
 type Sandbox struct {
 	config    *Config
+	sys       *System
 	lastError error
+}
+
+// system returns the emulated System model for this sandbox: the configured
+// model when present, otherwise DefaultSystem. Resolved once and memoized so
+// identity (boot id, boot time) stays stable for the sandbox.
+func (s *Sandbox) system() *System {
+	if s.sys == nil {
+		m := s.config.System
+		if m == nil {
+			m = DefaultSystem()
+		}
+		s.sys = m.Resolve()
+	}
+	return s.sys
 }
 
 func (s *Sandbox) hostname() string {
@@ -233,6 +251,28 @@ func (s *Sandbox) write(dest string, c string, mode os.FileMode) error {
 	return s.lastError
 }
 
+// materializeSysfs writes the model-rendered /sys/devices/system tree into
+// the rootfs as regular files, so the tree does not need seccomp emulation.
+// Explicit config payloads are applied after this and may override a file.
+func (s *Sandbox) materializeSysfs() error {
+	if s.lastError != nil {
+		return s.lastError
+	}
+	s.lastError = func() error {
+		for _, f := range s.system().SysfsDevices() {
+			p := filepath.Join(s.rootDir(), f.Path)
+			if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+				return err
+			}
+			if err := os.WriteFile(p, []byte(f.Content), 0444); err != nil {
+				return err
+			}
+		}
+		return nil
+	}()
+	return s.lastError
+}
+
 func (s *Sandbox) mount(f *fsType, src, dest string) error {
 	if s.lastError != nil {
 		return fmt.Errorf("previous error %w", s.lastError)
@@ -366,6 +406,9 @@ func (s *Sandbox) run() error {
 	s.mount(fsCgroup2, "cgroup2", "sys/fs/cgroup")
 	s.mount(fsDevPts, "devpts", "dev/pts")
 	s.mount(fsTmpfs, "tmpfs", "tmp")
+
+	s.materializeSysfs()
+
 	for _, p := range s.config.Payload {
 		switch p.Source.Type {
 		case "bind":
@@ -497,7 +540,7 @@ func (s *Sandbox) Run() error {
 
 	if s.config.Features.SyscallFilter {
 		if err := s.startSyscallFilter(control); err != nil {
-			return fmt.Errorf("s.startFakeProc error %w", err)
+			return fmt.Errorf("s.startSyscallFilter error %w", err)
 		}
 	}
 

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -26,10 +27,12 @@ const (
 	mockStatxIno       = 54321
 	mockStatfsType     = 0x1337BEEF
 	mockReadlinkTarget = "/mock/symlink_target"
+	mockUnameSysname   = "runkube-test"
+	mockUnameRelease   = "6.11.0-seccomp"
 )
 
 // buildTestMux constructs the mux with all mock routes for the end-to-end test
-func buildTestMux() (Filter, SupervisorConfig) {
+func buildTestMux() SupervisorConfig {
 	mux := NewMux()
 
 	mux.Handle("OPEN", mockOpenPath, SpoofFile(mockOpenContent))
@@ -47,6 +50,11 @@ func buildTestMux() (Filter, SupervisorConfig) {
 		Type: mockStatfsType,
 	}))
 	mux.Handle("READLINK", mockReadlinkPath, SpoofReadlink(mockReadlinkTarget))
+
+	mockUts := &unix.Utsname{}
+	copy(mockUts.Sysname[:], mockUnameSysname)
+	copy(mockUts.Release[:], mockUnameRelease)
+	mux.Handle("UNAME", "*", SpoofUname(mockUts))
 
 	return mux.Build()
 }
@@ -68,8 +76,8 @@ func TestSuperviseCallbacks(t *testing.T) {
 	childSock := fds[1]
 
 	// 2. Build the filter + config
-	filter, config := buildTestMux()
-	filterBytes, err := filter.MarshalBinary()
+	config := buildTestMux()
+	filterBytes, err := DefaultFilter.MarshalBinary()
 	if err != nil {
 		t.Fatalf("Failed to marshal filter: %v", err)
 	}
@@ -143,8 +151,8 @@ func runTestChild(t *testing.T) {
 		os.Exit(1)
 	}
 
-	// 1. Install Seccomp notify filter on this single thread
-	listenerFd, err := InstallFilter(nil)
+	// 1. Install the default Seccomp notify filter on this single thread
+	listenerFd, err := InstallFilter()
 	if err != nil {
 		slog.Error("Child failed to install seccomp filter", "error", err)
 		os.Exit(1)
@@ -233,6 +241,25 @@ func runTestChild(t *testing.T) {
 		os.Exit(1)
 	}
 	slog.Debug("Child successfully validated readlink callback spoofing")
+
+	// --- ASSERTION 6: Verify Uname Interception ---
+	var uts unix.Utsname
+	err = unix.Uname(&uts)
+	if err != nil {
+		slog.Error("Child uname system call failed", "error", err)
+		os.Exit(1)
+	}
+	sysname := strings.TrimRight(string(uts.Sysname[:]), "\x00")
+	release := strings.TrimRight(string(uts.Release[:]), "\x00")
+	if sysname != mockUnameSysname {
+		slog.Error("Uname verification failed: Sysname mismatch", "expected", mockUnameSysname, "got", sysname)
+		os.Exit(1)
+	}
+	if release != mockUnameRelease {
+		slog.Error("Uname verification failed: Release mismatch", "expected", mockUnameRelease, "got", release)
+		os.Exit(1)
+	}
+	slog.Debug("Child successfully validated uname callback spoofing")
 
 	os.Exit(0)
 }

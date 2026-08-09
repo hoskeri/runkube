@@ -109,6 +109,29 @@ func SpoofReadlink(target string) internal.Handler {
 	})
 }
 
+// SpoofUname returns handler that fakes uname(2) with a static result
+func SpoofUname(uts *unix.Utsname) internal.Handler {
+	return internal.HandlerFunc(func(ctx *internal.Context) {
+		ctx.Respond.SpoofUname(ctx.Args[0], uts)
+	})
+}
+
+// SpoofUnameFunc returns handler with dynamic uname data
+func SpoofUnameFunc(fn func() (*unix.Utsname, error)) internal.Handler {
+	return internal.HandlerFunc(func(ctx *internal.Context) {
+		uts, err := fn()
+		if err != nil {
+			ctx.Respond.Error(unix.EIO)
+			return
+		}
+		if uts == nil {
+			ctx.Respond.Continue()
+			return
+		}
+		ctx.Respond.SpoofUname(ctx.Args[0], uts)
+	})
+}
+
 // PassThrough continues natively (explicit no-op)
 func PassThrough() internal.Handler {
 	return internal.HandlerFunc(func(ctx *internal.Context) {

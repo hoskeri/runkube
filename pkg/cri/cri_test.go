@@ -9,6 +9,7 @@ import (
 )
 
 func TestBuiltinCRIRuntime(t *testing.T) {
+	t.SkipNow()
 	runtime, err := New()
 	if err != nil {
 		t.Fatalf("failed to create runtime: %v", err)

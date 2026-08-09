@@ -14,7 +14,7 @@ import (
 func LoggingMiddleware() internal.Middleware {
 	return func(next internal.Handler) internal.Handler {
 		return internal.HandlerFunc(func(ctx *internal.Context) {
-			slog.Debug("seccomp intercept", "method", ctx.Method, "path", ctx.Path, "pid", ctx.PID, "syscall", ctx.Syscall)
+			slog.Debug("seccomp intercept", "method", ctx.Method, "path", ctx.Path, "pid", ctx.PID, "syscall", ctx.Syscall, "flags", ctx.Flags)
 			next.ServeSeccomp(ctx)
 		})
 	}

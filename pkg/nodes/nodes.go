@@ -76,7 +76,6 @@ authentication:
 authorization:
 	mode: Webhook
 `
-
 	return c.configRef("kubelet-config").Write([]byte(kc))
 }
 
@@ -174,22 +173,12 @@ func (c *Node) sandboxConfig() (*sandbox.Config, error) {
 		},
 		Payload: []sandbox.Payload{
 			{Target: "/etc/kubernetes/kubelet.kubeconfig", Source: sandbox.PayloadSource{Type: "bind", Value: c.Kubeconfig}},
-
 			{Target: "/usr/bin/breakbulk", Source: sandbox.PayloadSource{Type: "bind", Value: c.selfBinary()}},
 			{Target: "/usr/bin/kubelet", Source: sandbox.PayloadSource{Type: "bind", Value: c.KubeletBinary}},
-
 			{Target: "/usr/bin/mount", FileMode: 0755, Source: sandbox.PayloadSource{Type: "write", Value: "#!/usr/bin/breakbulk mount\n"}},
-
-			{Target: "/sys/devices/system/cpu/online", Source: sandbox.PayloadSource{Type: "write", Value: "0-0"}},
-			{Target: "/sys/devices/system/node/node0/cpulist", Source: sandbox.PayloadSource{Type: "write", Value: "0-0"}},
-			{Target: "/sys/devices/system/node/node0/meminfo", Source: sandbox.PayloadSource{Type: "write", Value: "Node 0 MemTotal:       1 kB"}},
-			{Target: "/sys/devices/system/node/node0/distance", Source: sandbox.PayloadSource{Type: "write", Value: "100"}},
-			{Target: "/sys/devices/system/node/node0/cpu0/topology/core_id", Source: sandbox.PayloadSource{Type: "write", Value: "0"}},
-			{Target: "/sys/devices/system/node/node0/cpu0/topology/physical_package_id", Source: sandbox.PayloadSource{Type: "write", Value: "0"}},
 		},
 		Features: sandbox.Features{
 			SyscallFilter: true,
-			DebugLog:      true,
 		},
 	}, nil
 }
