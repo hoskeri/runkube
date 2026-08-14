@@ -57,6 +57,11 @@ func (c *ControlPlane) Run(ctx context.Context) error {
 	return fm.Run(ctx)
 }
 
+func (c *ControlPlane) logLevelFor(_ string) slog.Level {
+	return slog.LevelError
+
+}
+
 func (c *ControlPlane) hostname(tag string) string {
 	return fmt.Sprintf("%s-%s.internal.runkube", c.Name, tag)
 }

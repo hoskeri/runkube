@@ -5,7 +5,7 @@ go 1.26.3
 require (
 	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/hanwen/go-fuse/v2 v2.10.1
-	github.com/hoskeri/procman v0.0.0-20260531012441-db3a41a68c8f
+	github.com/hoskeri/procman v0.0.0-20260814223320-3e104afc466e
 	github.com/spf13/pflag v1.0.10
 	github.com/vishvananda/netlink v1.3.1
 	go.yaml.in/yaml/v3 v3.0.4
