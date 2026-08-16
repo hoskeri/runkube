@@ -31,5 +31,3 @@ lifecycle of sandboxes, containers, and images. Events are mutations of
 sandboxes, containers and images. The model keeps track of readiness state and
 simulated resource usage for each object.  Mutations can be triggered from
 runtime api, or by the passage of time (modelled as a tick).
-
-

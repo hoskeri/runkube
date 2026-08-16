@@ -19,6 +19,9 @@ $(DESTDIR):
 run: $(DESTDIR)/runkube
 	@./$(DESTDIR)/runkube
 
+test:
+	@CGO_ENABLED=0 go test -v ./...
+
 clean:
 	@rm -v -r -f $(DESTDIR)
 
