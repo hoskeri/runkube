@@ -72,17 +72,36 @@ func (b *BuiltinCRIRuntime) uniqID(s ...string) string {
 	return strings.Join(append(s, time.Now().UTC().Format("150405.000000")), "-")
 }
 
-// RunPodSandbox creates and starts a pod-level sandbox.
+// waitFuture blocks until the simulated event completes or ctx is done.
+// The runtime lock must not be held while waiting. Context cancellation is
+// translated into a gRPC status error so clients observe the right code.
+func waitFuture(ctx context.Context, f *model.Future) error {
+	if err := f.Wait(ctx); err != nil {
+		switch ctx.Err() {
+		case context.Canceled:
+			return status.Errorf(codes.Canceled, "%v", err)
+		case context.DeadlineExceeded:
+			return status.Errorf(codes.DeadlineExceeded, "%v", err)
+		}
+		return err
+	}
+	return nil
+}
+
+// RunPodSandbox creates and starts a pod-level sandbox. The model performs
+// the start asynchronously; the RPC blocks until the sandbox has reached
+// READY so callers observe a fully started sandbox.
 func (b *BuiltinCRIRuntime) RunPodSandbox(ctx context.Context, req *criv1.RunPodSandboxRequest) (resp *criv1.RunPodSandboxResponse, err error) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	if req.GetConfig().GetMetadata().GetUid() == "" {
+		b.mu.Unlock()
 		return nil, status.Errorf(codes.InvalidArgument, "pod sandbox id empty")
 	}
 
 	sbid := b.uniqID("sandbox", req.Config.GetMetadata().GetUid())
 	_, ok := b.runtime.GetSandbox(sbid)
 	if ok {
+		b.mu.Unlock()
 		return nil, status.Errorf(codes.AlreadyExists, "%s already exists", sbid)
 	}
 
@@ -117,33 +136,42 @@ func (b *BuiltinCRIRuntime) RunPodSandbox(ctx context.Context, req *criv1.RunPod
 
 	b.runtime.AddSandbox(sbid, model.NewSandbox(np, nps))
 
-	// Enqueue READY transition after 10 ticks (1s)
-	b.runtime.Enqueue(10, func(r *model.Runtime) {
+	// Schedule the READY transition in the model (async); the RPC blocks
+	// until the sandbox has started.
+	f := b.runtime.Schedule(b.runtime.Duration(model.OpSandboxStart), func(r *model.Runtime) {
 		if sb, ok := r.GetSandbox(sbid); ok {
 			sb.PodSandbox().State = criv1.PodSandboxState_SANDBOX_READY
 			sb.PodSandboxStatus().State = criv1.PodSandboxState_SANDBOX_READY
 			r.UpdateSandbox(sbid, sb)
 		}
 	})
+	b.mu.Unlock()
+
+	if err := waitFuture(ctx, f); err != nil {
+		return nil, err
+	}
 
 	return &criv1.RunPodSandboxResponse{
 		PodSandboxId: sbid,
 	}, nil
 }
 
-// StopPodSandbox stops the sandbox.
+// StopPodSandbox stops the sandbox. The model performs the stop
+// asynchronously; the RPC blocks until the sandbox is NOTREADY and its
+// child containers are EXITED.
 func (b *BuiltinCRIRuntime) StopPodSandbox(ctx context.Context, req *criv1.StopPodSandboxRequest) (resp *criv1.StopPodSandboxResponse, err error) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	sbid := req.GetPodSandboxId()
 
 	_, ok := b.runtime.GetSandbox(sbid)
 	if !ok {
+		b.mu.Unlock()
 		return nil, status.Errorf(codes.NotFound, "%s not found", sbid)
 	}
 
-	// Enqueue NOTREADY transition after 10 ticks (1s)
-	b.runtime.Enqueue(10, func(r *model.Runtime) {
+	// Schedule the NOTREADY transition and child stop in the model (async);
+	// the RPC blocks until the sandbox has stopped.
+	f := b.runtime.Schedule(b.runtime.Duration(model.OpSandboxStop), func(r *model.Runtime) {
 		if sb, ok := r.GetSandbox(sbid); ok {
 			sb.PodSandbox().State = criv1.PodSandboxState_SANDBOX_NOTREADY
 			sb.PodSandboxStatus().State = criv1.PodSandboxState_SANDBOX_NOTREADY
@@ -159,6 +187,11 @@ func (b *BuiltinCRIRuntime) StopPodSandbox(ctx context.Context, req *criv1.StopP
 			}
 		}
 	})
+	b.mu.Unlock()
+
+	if err := waitFuture(ctx, f); err != nil {
+		return nil, err
+	}
 
 	return &criv1.StopPodSandboxResponse{}, nil
 }
@@ -243,9 +276,17 @@ func (b *BuiltinCRIRuntime) ListPodSandboxStats(ctx context.Context, req *criv1.
 	return &criv1.ListPodSandboxStatsResponse{Stats: list}, nil
 }
 
-// ListPodSandboxMetrics returns metrics of the sandboxes.
+// ListPodSandboxMetrics returns the metric descriptors for all sandboxes.
 func (b *BuiltinCRIRuntime) ListPodSandboxMetrics(ctx context.Context, req *criv1.ListPodSandboxMetricsRequest) (resp *criv1.ListPodSandboxMetricsResponse, err error) {
-	return nil, nil
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var out []*criv1.PodSandboxMetrics
+	for _, sb := range b.runtime.ListSandboxes(nil) {
+		if m := b.runtime.PodSandboxMetrics(sb.PodSandbox().GetId()); m != nil {
+			out = append(out, m)
+		}
+	}
+	return &criv1.ListPodSandboxMetricsResponse{PodMetrics: out}, nil
 }
 
 // CreateContainer creates a new container in specified PodSandbox.
@@ -307,19 +348,20 @@ func (b *BuiltinCRIRuntime) CreateContainer(ctx context.Context, req *criv1.Crea
 	}, nil
 }
 
-// StartContainer starts the container.
+// StartContainer starts the container. The model performs the start
+// asynchronously; the RPC blocks until the container has reached RUNNING.
 func (b *BuiltinCRIRuntime) StartContainer(ctx context.Context, req *criv1.StartContainerRequest) (resp *criv1.StartContainerResponse, err error) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
-
 	scid := req.GetContainerId()
 	_, ok := b.runtime.GetContainer(scid)
 	if !ok {
+		b.mu.Unlock()
 		return nil, status.Errorf(codes.NotFound, "container %s not found", scid)
 	}
 
-	// Enqueue RUNNING transition after 10 ticks (1s)
-	b.runtime.Enqueue(10, func(r *model.Runtime) {
+	// Schedule the RUNNING transition in the model (async); the RPC blocks
+	// until the container has started.
+	f := b.runtime.Schedule(b.runtime.Duration(model.OpContainerStart), func(r *model.Runtime) {
 		if c, ok := r.GetContainer(scid); ok {
 			c.Container().State = criv1.ContainerState_CONTAINER_RUNNING
 			c.ContainerStatus().State = criv1.ContainerState_CONTAINER_RUNNING
@@ -327,23 +369,30 @@ func (b *BuiltinCRIRuntime) StartContainer(ctx context.Context, req *criv1.Start
 			r.UpdateContainer(scid, c)
 		}
 	})
+	b.mu.Unlock()
+
+	if err := waitFuture(ctx, f); err != nil {
+		return nil, err
+	}
 
 	return &criv1.StartContainerResponse{}, nil
 }
 
-// StopContainer stops a running container with a grace period (i.e., timeout).
+// StopContainer stops a running container with a grace period (i.e.,
+// timeout). The model performs the stop asynchronously; the RPC blocks
+// until the container has reached EXITED.
 func (b *BuiltinCRIRuntime) StopContainer(ctx context.Context, req *criv1.StopContainerRequest) (resp *criv1.StopContainerResponse, err error) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
-
 	scid := req.GetContainerId()
 	_, ok := b.runtime.GetContainer(scid)
 	if !ok {
+		b.mu.Unlock()
 		return nil, status.Errorf(codes.NotFound, "%s not found", scid)
 	}
 
-	// Enqueue EXITED transition after 10 ticks (1s)
-	b.runtime.Enqueue(10, func(r *model.Runtime) {
+	// Schedule the EXITED transition in the model (async); the RPC blocks
+	// until the container has stopped.
+	f := b.runtime.Schedule(b.runtime.Duration(model.OpContainerStop), func(r *model.Runtime) {
 		if c, ok := r.GetContainer(scid); ok {
 			c.Container().State = criv1.ContainerState_CONTAINER_EXITED
 			c.ContainerStatus().State = criv1.ContainerState_CONTAINER_EXITED
@@ -351,6 +400,11 @@ func (b *BuiltinCRIRuntime) StopContainer(ctx context.Context, req *criv1.StopCo
 			r.UpdateContainer(scid, c)
 		}
 	})
+	b.mu.Unlock()
+
+	if err := waitFuture(ctx, f); err != nil {
+		return nil, err
+	}
 
 	return &criv1.StopContainerResponse{}, nil
 }
@@ -454,10 +508,85 @@ func (b *BuiltinCRIRuntime) CheckpointContainer(ctx context.Context, req *criv1.
 	return nil, nil
 }
 
-// GetContainerEvents gets container events.
+// GetContainerEvents streams container lifecycle events from the model's
+// event stream, mapped to CRI container event types.
 func (b *BuiltinCRIRuntime) GetContainerEvents(req *criv1.GetEventsRequest, srv criv1.RuntimeService_GetContainerEventsServer) error {
-	time.Sleep(30 * time.Second)
+	sub := b.runtime.Subscribe()
+	defer sub.Close()
+	for ev := range sub.Events() {
+		resp, ok := containerEventResponse(ev, b.runtime)
+		if !ok {
+			continue
+		}
+		if err := srv.Send(resp); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// streamMetricsInterval is the sampling period for StreamPodSandboxMetrics.
+const streamMetricsInterval = time.Second
+
+// StreamPodSandboxMetrics streams periodic metric samples for all sandboxes.
+func (b *BuiltinCRIRuntime) StreamPodSandboxMetrics(req *criv1.StreamPodSandboxMetricsRequest, srv criv1.RuntimeService_StreamPodSandboxMetricsServer) error {
+	ticker := time.NewTicker(streamMetricsInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			b.mu.Lock()
+			var out []*criv1.PodSandboxMetrics
+			for _, sb := range b.runtime.ListSandboxes(nil) {
+				if m := b.runtime.PodSandboxMetrics(sb.PodSandbox().GetId()); m != nil {
+					out = append(out, m)
+				}
+			}
+			b.mu.Unlock()
+			if err := srv.Send(&criv1.StreamPodSandboxMetricsResponse{PodSandboxMetrics: out}); err != nil {
+				return err
+			}
+		case <-srv.Context().Done():
+			return srv.Context().Err()
+		}
+	}
+}
+
+// containerEventResponse maps a model event to a CRI container event, or ok
+// == false when the event is not a container lifecycle event. Status
+// snapshots are attached when the objects still exist.
+func containerEventResponse(ev model.Event, rt *model.Runtime) (resp *criv1.ContainerEventResponse, ok bool) {
+	var typ criv1.ContainerEventType
+	switch ev.Kind {
+	case model.EventContainerCreated:
+		typ = criv1.ContainerEventType_CONTAINER_CREATED_EVENT
+	case model.EventContainerStateChanged:
+		switch ev.ToC {
+		case criv1.ContainerState_CONTAINER_RUNNING:
+			typ = criv1.ContainerEventType_CONTAINER_STARTED_EVENT
+		case criv1.ContainerState_CONTAINER_EXITED:
+			typ = criv1.ContainerEventType_CONTAINER_STOPPED_EVENT
+		default:
+			return nil, false
+		}
+	case model.EventContainerRemoved:
+		typ = criv1.ContainerEventType_CONTAINER_DELETED_EVENT
+	default:
+		return nil, false
+	}
+
+	out := &criv1.ContainerEventResponse{
+		ContainerId:        ev.ID,
+		ContainerEventType: typ,
+		CreatedAt:          time.Now().UTC().UnixNano(),
+	}
+	if sb, ok := rt.GetSandbox(ev.Sandbox); ok && sb.PodSandboxStatus() != nil {
+		out.PodSandboxStatus = proto.Clone(sb.PodSandboxStatus()).(*criv1.PodSandboxStatus)
+	}
+	if c, ok := rt.GetContainer(ev.ID); ok && c.ContainerStatus() != nil {
+		out.ContainersStatuses = []*criv1.ContainerStatus{proto.Clone(c.ContainerStatus()).(*criv1.ContainerStatus)}
+	}
+	return out, true
 }
 
 // ListImages lists all images.
@@ -494,25 +623,18 @@ func (b *BuiltinCRIRuntime) ImageStatus(_ context.Context, req *criv1.ImageStatu
 	}, nil
 }
 
-// PullImage pulls an image.
+// PullImage pulls an image. Images are pulled asynchronously in the model;
+// the RPC waits (synchronously) for the pull to complete.
 func (b *BuiltinCRIRuntime) PullImage(ctx context.Context, req *criv1.PullImageRequest) (*criv1.PullImageResponse, error) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	ch := make(chan struct{})
-	b.runtime.Enqueue(10, func(r *model.Runtime) {
+	f := b.runtime.Schedule(b.runtime.Duration(model.OpImagePull), func(r *model.Runtime) {
 		r.AddImage(req.Image.GetImage(), model.NewImage(req.Image))
-		close(ch)
 	})
-
 	b.mu.Unlock()
-	select {
-	case <-ch:
-	case <-ctx.Done():
-		b.mu.Lock()
-		return nil, ctx.Err()
+
+	if err := waitFuture(ctx, f); err != nil {
+		return nil, err
 	}
-	b.mu.Lock()
 
 	return &criv1.PullImageResponse{
 		ImageRef: req.Image.GetImage(),

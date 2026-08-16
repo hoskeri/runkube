@@ -9,12 +9,6 @@ import (
 	criv1 "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
 
-// Event represents a scheduled simulation task.
-type Event struct {
-	Sequence uint64
-	Callback func(r *Runtime)
-}
-
 // Runtime tracks the objects in container runtime discrete event model.
 type Runtime struct {
 	mu         sync.Mutex
@@ -22,24 +16,37 @@ type Runtime struct {
 	containers map[string]*Container
 	images     map[string]*Image
 
-	// Simulation queue properties
-	tickRate time.Duration
-	seq      uint64
-	events   []Event
+	// Simulation clock (see engine.go).
+	now   Ticks
+	order uint64
+	queue eventHeap
+
+	// Optional wall-clock adapter.
+	stopCh    chan struct{}
+	closeOnce sync.Once
+
+	// Resource accounting configuration (see resource.go).
+	opts      Options
+	startTime time.Time
+
+	// Event subscriptions (see events.go).
+	subs   map[uint64]*Subscription
+	subSeq uint64
 }
 
 // Sandbox model
 type Sandbox struct {
 	p     *criv1.PodSandbox
 	s     *criv1.PodSandboxStatus
-	stats *criv1.PodSandboxStats
+	usage Usage
 }
 
 // Container model
 type Container struct {
 	p     *criv1.Container
 	s     *criv1.ContainerStatus
-	stats *criv1.ContainerStats
+	spec  ResourceSpec
+	usage Usage
 }
 
 // Image model
@@ -73,16 +80,34 @@ func (s *Sandbox) PodSandboxStatus() *criv1.PodSandboxStatus {
 	return s.s
 }
 
-func (s *Sandbox) PodSandboxStats() *criv1.PodSandboxStats {
+// Usage returns the sandbox's accumulated resource usage, aggregated from
+// its member containers plus the sandbox namespace's network overhead.
+func (s *Sandbox) Usage() Usage {
 	if s == nil {
-		return nil
+		return Usage{}
 	}
-	return s.stats
+	return s.usage
 }
 
-func (s *Sandbox) SetPodSandboxStats(stats *criv1.PodSandboxStats) {
-	if s != nil {
-		s.stats = stats
+// state returns the authoritative sandbox state: the PodSandbox State when
+// present, falling back to the status. The two are kept equal by reconcile.
+func (s *Sandbox) state() criv1.PodSandboxState {
+	if s != nil && s.p != nil {
+		return s.p.State
+	}
+	if s != nil && s.s != nil {
+		return s.s.State
+	}
+	return criv1.PodSandboxState_SANDBOX_NOTREADY
+}
+
+// reconcile keeps the status State in lockstep with the authoritative
+// PodSandbox State so the two protos can never report different states. The
+// PodSandbox proto wins: a caller that mutates only the status State will
+// have that change discarded at the next Add/Update.
+func (s *Sandbox) reconcile() {
+	if s != nil && s.p != nil && s.s != nil {
+		s.s.State = s.p.State
 	}
 }
 
@@ -100,16 +125,31 @@ func (c *Container) ContainerStatus() *criv1.ContainerStatus {
 	return c.s
 }
 
-func (c *Container) ContainerStats() *criv1.ContainerStats {
+// Usage returns the container's accumulated resource usage.
+func (c *Container) Usage() Usage {
 	if c == nil {
-		return nil
+		return Usage{}
 	}
-	return c.stats
+	return c.usage
 }
 
-func (c *Container) SetContainerStats(stats *criv1.ContainerStats) {
-	if c != nil {
-		c.stats = stats
+// state returns the authoritative container state: the Container State when
+// present, falling back to the status. The two are kept equal by reconcile.
+func (c *Container) state() criv1.ContainerState {
+	if c != nil && c.p != nil {
+		return c.p.State
+	}
+	if c != nil && c.s != nil {
+		return c.s.State
+	}
+	return criv1.ContainerState_CONTAINER_CREATED
+}
+
+// reconcile keeps the status State in lockstep with the authoritative
+// Container State so the two protos can never report different states.
+func (c *Container) reconcile() {
+	if c != nil && c.p != nil && c.s != nil {
+		c.s.State = c.p.State
 	}
 }
 
@@ -132,11 +172,7 @@ func (s *Sandbox) Clone() *Sandbox {
 	if s.s != nil {
 		status = proto.Clone(s.s).(*criv1.PodSandboxStatus)
 	}
-	var stats *criv1.PodSandboxStats
-	if s.stats != nil {
-		stats = proto.Clone(s.stats).(*criv1.PodSandboxStats)
-	}
-	return &Sandbox{p: p, s: status, stats: stats}
+	return &Sandbox{p: p, s: status, usage: s.usage}
 }
 
 func (c *Container) Clone() *Container {
@@ -151,11 +187,7 @@ func (c *Container) Clone() *Container {
 	if c.s != nil {
 		status = proto.Clone(c.s).(*criv1.ContainerStatus)
 	}
-	var stats *criv1.ContainerStats
-	if c.stats != nil {
-		stats = proto.Clone(c.stats).(*criv1.ContainerStats)
-	}
-	return &Container{p: p, s: status, stats: stats}
+	return &Container{p: p, s: status, spec: c.spec, usage: c.usage}
 }
 
 func (img *Image) Clone() *Image {
@@ -182,7 +214,7 @@ func (x *Sandbox) Match(f *criv1.PodSandboxFilter) bool {
 	}
 
 	if f.State != nil {
-		if x.s == nil || x.s.State != f.State.State {
+		if x.state() != f.State.State {
 			return false
 		}
 	}
@@ -214,7 +246,7 @@ func (x *Container) Match(f *criv1.ContainerFilter) bool {
 	}
 
 	if f.State != nil {
-		if x.s == nil || x.s.State != f.State.State {
+		if x.state() != f.State.State {
 			return false
 		}
 	}
@@ -244,79 +276,47 @@ func (x *Image) Match(f *criv1.ImageFilter) bool {
 
 // Runtime API implementation
 func NewRuntime(tickRate time.Duration) *Runtime {
-	r := &Runtime{
-		sandboxes:  make(map[string]*Sandbox),
-		containers: make(map[string]*Container),
-		images:     make(map[string]*Image),
-		tickRate:   tickRate,
-	}
-	if tickRate > 0 {
-		go r.runSimulation()
-	}
-	return r
+	return New(Options{TickRate: tickRate})
 }
 
-// Enqueue registers a delayed callback and returns a channel that closes when the event completes.
+// Enqueue schedules callback after delayTicks ticks and blocks until it has
+// run. Deprecated: use Schedule for asynchronous callbacks, or Submit with
+// Future.Wait for atomic commits.
 func (r *Runtime) Enqueue(delayTicks uint64, callback func(r *Runtime)) <-chan struct{} {
-	r.mu.Lock()
-	targetSeq := r.seq + delayTicks
-	done := make(chan struct{})
-	r.events = append(r.events, Event{
-		Sequence: targetSeq,
-		Callback: func(rt *Runtime) {
-			callback(rt)
-			close(done)
-		},
-	})
-
-	r.mu.Unlock()
-	<-done
+	f := r.Schedule(Ticks(delayTicks), callback)
+	<-f.Done()
 	return nil
-}
-
-// runSimulation runs the background ticker.
-func (r *Runtime) runSimulation() {
-	ticker := time.NewTicker(r.tickRate)
-	defer ticker.Stop()
-	for range ticker.C {
-		r.mu.Lock()
-		r.seq++
-		currentSeq := r.seq
-
-		var toRun []Event
-		var remaining []Event
-		for _, ev := range r.events {
-			if ev.Sequence <= currentSeq {
-				toRun = append(toRun, ev)
-			} else {
-				remaining = append(remaining, ev)
-			}
-		}
-		r.events = remaining
-		r.mu.Unlock()
-
-		for _, ev := range toRun {
-			ev.Callback(r)
-		}
-	}
 }
 
 func (r *Runtime) AddSandbox(id string, sb *Sandbox) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.sandboxes[id] = sb.Clone()
+	c := sb.Clone()
+	c.reconcile()
+	r.sandboxes[id] = c
+	r.emit(Event{Kind: EventSandboxCreated, ID: id, ToSB: c.state(), At: r.now})
 }
 
 func (r *Runtime) RemoveSandbox(id string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if _, ok := r.sandboxes[id]; !ok {
+		return
+	}
 	delete(r.sandboxes, id)
+	r.emit(Event{Kind: EventSandboxRemoved, ID: id, At: r.now})
 }
 
 func (r *Runtime) UpdateSandbox(id string, sb *Sandbox) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.sandboxes[id] = sb.Clone()
+	old := r.sandboxes[id]
+	c := sb.Clone()
+	c.reconcile()
+	r.sandboxes[id] = c
+	if old != nil && old.state() != c.state() {
+		r.emit(Event{Kind: EventSandboxStateChanged, ID: id, FromSB: old.state(), ToSB: c.state(), At: r.now})
+	}
 }
 
 func (r *Runtime) ListSandboxes(f *criv1.PodSandboxFilter) []*Sandbox {
@@ -343,19 +343,35 @@ func (r *Runtime) GetSandbox(id string) (*Sandbox, bool) {
 func (r *Runtime) AddContainer(id string, c *Container) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.containers[id] = c.Clone()
+	cc := c.Clone()
+	cc.reconcile()
+	r.containers[id] = cc
+	if cc.p != nil {
+		r.emit(Event{Kind: EventContainerCreated, ID: id, Sandbox: cc.p.PodSandboxId, ToC: cc.state(), At: r.now})
+	}
 }
 
 func (r *Runtime) RemoveContainer(id string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if _, ok := r.containers[id]; !ok {
+		return
+	}
 	delete(r.containers, id)
+	r.emit(Event{Kind: EventContainerRemoved, ID: id, At: r.now})
 }
 
 func (r *Runtime) UpdateContainer(id string, c *Container) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.containers[id] = c.Clone()
+	old := r.containers[id]
+	cc := c.Clone()
+	cc.reconcile()
+	r.containers[id] = cc
+	if old != nil && old.state() != cc.state() && cc.p != nil {
+		r.emit(Event{Kind: EventContainerStateChanged, ID: id, Sandbox: cc.p.PodSandboxId,
+			FromC: old.state(), ToC: cc.state(), At: r.now})
+	}
 }
 
 func (r *Runtime) ListContainers(f *criv1.ContainerFilter) []*Container {
@@ -383,12 +399,17 @@ func (r *Runtime) AddImage(id string, img *Image) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.images[id] = img.Clone()
+	r.emit(Event{Kind: EventImagePulled, ID: id, At: r.now})
 }
 
 func (r *Runtime) RemoveImage(id string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if _, ok := r.images[id]; !ok {
+		return
+	}
 	delete(r.images, id)
+	r.emit(Event{Kind: EventImageRemoved, ID: id, At: r.now})
 }
 
 func (r *Runtime) UpdateImage(id string, img *Image) {
@@ -426,47 +447,52 @@ func (r *Runtime) ListPodSandboxStats(f *criv1.PodSandboxStatsFilter) []*criv1.P
 	defer r.mu.Unlock()
 	var list []*criv1.PodSandboxStats
 	for _, sb := range r.sandboxes {
-		if sb.stats != nil {
-			if f == nil || f.Id == "" || sb.p.Id == f.Id {
-				list = append(list, proto.Clone(sb.stats).(*criv1.PodSandboxStats))
-			}
+		if sb.p == nil {
+			continue
+		}
+		if f == nil || f.Id == "" || sb.p.Id == f.Id {
+			list = append(list, r.materializePodSandboxStats(sb))
 		}
 	}
 	return list
 }
 
 func (r *Runtime) GetPodSandboxStats(id string) (*criv1.PodSandboxStats, bool) {
-	sb, ok := r.GetSandbox(id)
-	if !ok || sb.stats == nil {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	sb, ok := r.sandboxes[id]
+	if !ok {
 		return nil, false
 	}
-	return proto.Clone(sb.stats).(*criv1.PodSandboxStats), true
+	return r.materializePodSandboxStats(sb), true
 }
 
 func (r *Runtime) ListContainerStats(f *criv1.ContainerStatsFilter) []*criv1.ContainerStats {
-	cf := &criv1.ContainerFilter{
-		Id:            f.Id,
-		PodSandboxId:  f.PodSandboxId,
-		LabelSelector: f.LabelSelector,
-	}
-
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	var cf *criv1.ContainerFilter
+	if f != nil {
+		cf = &criv1.ContainerFilter{
+			Id:            f.Id,
+			PodSandboxId:  f.PodSandboxId,
+			LabelSelector: f.LabelSelector,
+		}
+	}
 	var list []*criv1.ContainerStats
 	for _, c := range r.containers {
-		if c.stats != nil {
-			if c.Match(cf) {
-				list = append(list, proto.Clone(c.stats).(*criv1.ContainerStats))
-			}
+		if c.Match(cf) {
+			list = append(list, r.materializeContainerStats(c))
 		}
 	}
 	return list
 }
 
 func (r *Runtime) GetContainerStats(id string) (*criv1.ContainerStats, bool) {
-	c, ok := r.GetContainer(id)
-	if !ok || c.stats == nil {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	c, ok := r.containers[id]
+	if !ok {
 		return nil, false
 	}
-	return proto.Clone(c.stats).(*criv1.ContainerStats), true
+	return r.materializeContainerStats(c), true
 }

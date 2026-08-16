@@ -1,102 +1,116 @@
 # Simulated Container Runtime Architecture and Model Design
 
-This document describes the design, implementation, and capabilities of the
-encapsulated simulated Kubernetes container runtime model in the
-`pkg/cri/model` package.
+This document describes the design and implementation of the encapsulated
+simulated Kubernetes container runtime model in the `pkg/cri/model`
+package. For user-facing extension docs see `docs/cri-model-usage.md`; for
+the redesign rationale and the phased rollout see
+`docs/cri-model-redesign.md`.
 
-## 1. Architectural Principles
+## 1. Architectural principles
 
-The simulated container runtime is designed around **strong encapsulation**,
-**thread safety**, **immutability/cloning**, and **event-driven simulation**.
-The package abstracts all internal storage and lifecycle states so that
-external callers (such as `pkg/cri/cri.go`) interact strictly through clean
-public interfaces.
+The simulated container runtime is built around **strong encapsulation**,
+**thread safety**, **immutability/cloning**, and **deterministic discrete
+event simulation**. External callers (such as `pkg/cri/cri.go`) interact
+strictly through public interfaces; all internal storage, the simulation
+clock, and event delivery are encapsulated.
 
-## 2. Models and Encapsulation
+## 2. Models and encapsulation
 
-All primary models in `pkg/cri/model` enforce complete field encapsulation:
-* **`Sandbox`**: Wraps `criv1.PodSandbox` and `criv1.PodSandboxStatus`.
-* **`Container`**: Wraps `criv1.Container` and `criv1.ContainerStatus`.
-* **`Image`**: Wraps `criv1.ImageSpec`.
+* **`Sandbox`**: wraps `criv1.PodSandbox` and `criv1.PodSandboxStatus`,
+  plus aggregated `Usage`.
+* **`Container`**: wraps `criv1.Container` and `criv1.ContainerStatus`,
+  plus a `ResourceSpec` and per-object `Usage`.
+* **`Image`**: wraps `criv1.ImageSpec`.
 
-### Stats as Properties of Respective Objects
+### Single source of truth for state
 
-Following object-oriented domain modeling principles, **statistics are
-represented directly as properties of their respective parent objects** rather
-than being tracked in disjoint collections:
-* `Sandbox` holds a private `stats *criv1.PodSandboxStats` property, accessible
-  via `PodSandboxStats()` and `SetPodSandboxStats()`.
-* `Container` holds a private `stats *criv1.ContainerStats` property,
-  accessible via `ContainerStats()` and `SetContainerStats()`.
+`PodSandbox`/`Container` is the authoritative proto for `State`. Every
+write path (`Add*`, `Update*`) reconciles the status proto's `State` to
+match (`Sandbox.reconcile` / `Container.reconcile`), so the two protos can
+never report different states. `Match()` state filters use the authoritative
+state via `state()`. Status-only fields (Network, LogPath, FinishedAt, …)
+pass through untouched.
 
-This ensures stats automatically share the lifecycle and identification
-attributes of their parent objects.
+### Immutability & corruption prevention
 
-### Immutability & Corruption Prevention
+All model types provide `Clone()` (deep copies via `proto.Clone`, plus the
+value fields). `Runtime` methods clone incoming objects on `Add*`/`Update*`
+and clone outgoing objects on `Get*`/`List*`. Object accessors
+(`PodSandbox()`, `PodSandboxStatus()`, …) return the object's internal
+pointers, so the get-modify-put pattern (`Get` → mutate → `Update`) works;
+the store's cloning guarantees the stored state cannot be corrupted by
+callers.
 
-To prevent concurrent modification and state corruption, **all model structures
-support deep copy cloning**:
+## 3. Simulation engine (`engine.go`)
 
-* Every model type provides a `Clone()` method that duplicates internal
-  protobuf fields using `proto.Clone`.
-* `Runtime` methods clone incoming objects upon `Add*`/`Update*` operations and
-  clone outgoing objects during `Get*`/`List*` queries. This guarantees that
-  mutated copies outside the model package cannot corrupt the internal store.
+* **`Ticks`** (`uint64`) is the only unit of simulated time. The clock is
+  owned by `Runtime` (`now`).
+* **Event queue**: a `container/heap` priority queue keyed by `(due, order)`
+  (FIFO at equal due ticks).
+* **`Advance(n)` / `Step()` / `FastForward(n)`** move the clock and
+  dispatch every event due by the target. Advance segments the window at
+  event boundaries so a state change caused by an event is reflected in the
+  accounting of later segments; events scheduled during dispatch with due ≤
+  target run in the same Advance.
+* **Wall-clock adapter**: `Options.TickRate > 0` starts a goroutine calling
+  `Advance(1)` per tick; `tickRate == 0` selects a manually driven clock
+  (used by all tests). `Close()` stops the adapter and closes
+  subscriptions.
 
-## 3. Runtime API Design
+### Operations: Do, Submit, Schedule
 
-The `model.Runtime` struct represents the active simulated container runtime
-state. It completely encapsulates state maps and synchronization, exposing
-state manipulation exclusively via standard public operations:
+* **`Do(muts ...Mutation)`** applies mutations immediately and atomically:
+  the runtime lock is held for the whole list. Mutations must not call back
+  into public methods.
+* **`Submit(delay, muts ...Mutation)`** schedules an atomic commit at
+  `now+delay`; the commit runs under the lock exactly like `Do`.
+* **`Schedule(delay, fn)`** runs `fn` on the driver outside the lock; `fn`
+  may use the public API and schedule further events.
+* All three return `*Future` with `Done()`, `Wait(ctx)`, `Cancel()`.
+* `Enqueue` remains as a deprecated blocking wrapper over `Schedule`.
 
-* **Unified API Design**: `Runtime` exposes `Add*`, `Remove*`, `Update*`,
-  `Get*`, and `List*` methods for Sandboxes, Containers, and Images.
-* **Get as a Special Case of List**: To ensure maximum code reuse and
-  consistent filtering/cloning, all `Get*` APIs are implemented internally as
-  special cases of `List*` (delegating with matching filters):
+## 4. Resource usage model (`resource.go`)
 
-  ```go
-  func (r *Runtime) GetSandbox(id string) (*Sandbox, bool) {
-      list := r.ListSandboxes(&criv1.PodSandboxFilter{Id: id})
-      if len(list) == 0 {
-          return nil, false
-      }
-      return list[0], true
-  }
-  ```
+* **`Options`**: `TickRate`, `TickDuration` (100ms), `Delays`
+  (10 ticks per op), `Hooks`, `LoadIdle`/`LoadActive` (0.02/0.35),
+  `LimitEnforcement` (off). Zero values take defaults.
+* **`ResourceSpec`**: CPU millis, memory bytes, network rates; assigned via
+  the `SetContainerSpec` mutation; `DefaultResourceSpec` fallback.
+* **Accounting**: `account(delta)` is invoked by Advance per segment. It
+  snapshots object state under the lock, computes utilization per container
+  (default state-based, or the `Hooks.Load` override, called outside the
+  lock), then applies deltas under the lock:
+  * CPU: `UsageCoreNanoSeconds` accumulates the integrated load
+    (`u·millis·ns/tick·ticks`); `UsageNanoCores` is the instantaneous rate.
+  * Memory: working set ramps exponentially toward `limit·u` and drains
+    after stop; page faults accrue with growth.
+  * Network: cumulative rx/tx bytes at the configured interface rates.
+  * Sandbox usage is re-aggregated from member containers plus a 10%
+    network overhead.
+* **Stats materialization**: `Get*Stats`/`List*Stats` build CRI protos from
+  internal `Usage` at request time — no stale caches. `PodSandboxMetrics`
+  serves the provisional metric descriptors (`cpu/usage`,
+  `cpu/usage_cores`, `memory/{usage,working_set,rss}`,
+  `network/{rx,tx}_bytes`).
+* **Limit enforcement**: with `LimitEnforcement`, a running container whose
+  load reaches 1.0 transitions to EXITED (reason `OOMKilled`, exit 137) and
+  emits a state-change event.
 
-## 4. Model-Wide Discrete Event Simulation Queue
+## 5. Event stream (`events.go`)
 
-The discrete event simulation mechanism is built directly as an internal
-property of `model.Runtime`, modeling asynchronous operations (e.g. image
-pulling, sandbox starting, container launching) as deterministic sequences of
-ticks.
+* Every commit emits a typed `Event` (created/removed/state-changed per
+  object kind; `From`/`To` states; optional `Reason`; `At` tick).
+* `Subscribe()` registers a bounded (128) non-blocking channel; a slow
+  consumer drops events — the engine never blocks on delivery.
+* `Subscription.Close()` and `Runtime.Close()` close the channel.
+* `pkg/cri/cri.go` maps container events to `GetContainerEvents`
+  (CREATED/STARTED/STOPPED/DELETED with status snapshots) and serves
+  `ListPodSandboxMetrics` / `StreamPodSandboxMetrics` from the accounting.
 
-### The Event Queue
+## 6. Thread safety
 
-* **Event Structure**:
-
-  ```go
-    type Event struct {
-        Sequence uint64
-        Callback func(r *Runtime)
-    }
-  ```
-
-* **Active Queue**: `events []Event` tracks scheduled simulation tasks.
-* **Sequence Counter**: `seq uint64` tracks the elapsed simulation time
-  (ticks).
-* **Tick Rate**: `tickRate time.Duration` determines the real-world duration of
-  a single simulation tick (controlling simulation speed).
-
-### Execution Mechanism
-
-1. **Background Goroutine**: A package-internal background goroutine ticks at
-   the defined `tickRate` interval.
-2. **Tick Progression**: Every tick, the goroutine locks `Runtime`, increments
-   `seq`, collects all scheduled events whose target `Sequence <= seq`, updates
-   the active queue to remove them, and releases the lock.
-3. **Safe Dispatch**: Collected event callbacks are dispatched **outside of the
-   internal lock** (`r.mu`). This ensures that event callbacks can freely lock
-   `Runtime` to read states, update models, or schedule subsequent events
-   without deadlocking the server.
+* All public methods are safe for concurrent use.
+* Hooks run on the driver outside the lock (public API reads OK).
+* `Do`/`Submit` mutations run with the lock held and must not re-enter.
+* Only one goroutine drives the clock at a time (the adapter, or the
+  caller of `Advance` in manual mode).
