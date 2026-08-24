@@ -373,12 +373,15 @@ func (s *Sandbox) supervisorConfig() (seccomp.Filter, seccomp.SupervisorConfig) 
     return mux.Build()
 }
 
-// In sandbox.go:
-func (s *Sandbox) startSyscallFilter(control *fdchan.Parent) error {
-    filter, config := s.supervisorConfig()
-    listenerFd, _ := seccomp.InstallFilter(filter)
-    // ... pass FD to supervisor ...
-    go seccomp.Supervise(listenerFd, config)
+// In sandbox.go: the child installs the filter during the single setup RPC
+// and returns the listener FD in the setup response; the parent supervises it.
+func (s *Sandbox) installSyscallFilter() (int, error) {
+    return seccomp.InstallFilter()
+}
+// ... child adds the returned FD to the setup response (id "seccomp-fd") ...
+func (s *Sandbox) superviseSyscallFilter(lfd *os.File) error {
+    config := s.supervisorConfig()
+    go seccomp.Supervise(lfd, config)
 }
 ```
 

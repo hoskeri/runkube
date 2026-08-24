@@ -329,14 +329,14 @@ func TestDefaultSystem(t *testing.T) {
 
 func TestConfigSystemRoundTrip(t *testing.T) {
 	c := &Config{
-		Version: "v1", Hostname: "h", MachineID: "m", IPAddress: "10.0.0.1",
+		Version: "v1", Hostname: "h", MachineID: "m", IPAddress: "10.2.3.4",
 		System: testSystem(),
 	}
-	ck, err := writeCookie(c)
+	ck, err := encodeConfig(c)
 	if err != nil {
 		t.Fatal(err)
 	}
-	back, err := readCookie(ck)
+	back, err := decodeConfig(ck)
 	if err != nil {
 		t.Fatal(err)
 	}

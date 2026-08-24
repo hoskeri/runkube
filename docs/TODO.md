@@ -1,33 +1,54 @@
 # TODO
 
-Always ask user what to do next, don't assume items are listed in any
-particular order. Refuse to implement items without a well-formed description.
+- Always ask user what to do next.
+- Do not assume items are listed in any particular order.
+- Refuse to implement items without a well-formed description.
+- Once done, mark the item as completed, and move it to docs/DONE.md
+
+## Runkube
+
+### Log level per component
+
+Everything is silent (LevelError) by default. But we should be able to override
+the log level per-component. Propagate the log level to nodes as well.
+
+### Lazy initialization
+
+Everything is re(initialized) at startup with `c.Init(). We want to be lazy.
+For example, config files, kubeconfigs and certificates should be re-written
+on demand, if they are out of date.
 
 ## Sandbox
 
-### Single Roundtrip
+### File IO improvements
 
-Instead of multiple fdchan roundtrips, lets just perform one "setup" RPC. the
-request passes metadata and file descriptors to the child, and the child
-responds with other metadata and file descriptors to the parent.
+Every file is a new memfd today, and they are not writable? In either case,
+sometimes we want to emulate files as TRO, RW or RDWR. Lets support that.
 
-### Dynamic file injection
+Also, instead of returning new unique memfd for every open, lets create a file
+within the rootfs on first use, and return an open descriptor to that instead,
+following the requested file open mode bits.
 
-The child should pass a rootfs fd to the parent. This should be suitable for
+For files like in proc, where we cannot create the emulated files in the
+original path, create a directory called `/.emulated` instead.
 
-The contents of /sys/devices, and other files that are injected directly into the
-container rootfs, that are currently to the child in the sandbox config data, should
-instead be created using this rootfs (like `os.MkdirAt(rootfsFd, "/sys/devices/node0")`).
+### Disk usage
 
-This way, we can easily modify the contents of these files at runtime, not just
-at container start.
+Model filesystem disk space and inode space usage for the configured mount points.
+Emulate a reasonable default value for the interesting mount points.
 
 ## CRI model
 
-### Runtime, Sandbox, Image and Container State Machines
+### Container process lifecycle
 
-Design a performant discrete event simulation of a runtime, modelling the
-lifecycle of sandboxes, containers, and images. Events are mutations of
-sandboxes, containers and images. The model keeps track of readiness state and
-simulated resource usage for each object.  Mutations can be triggered from
-runtime api, or by the passage of time (modelled as a tick).
+While we model container lifecycle states (Start/Stop/Create/Delete, etc), we
+should also model container starts and stops as well. Real processes sometimes
+exit successfully, sometimes not. We should model that behavior.
+
+Container processes should sometimes stop after a realistic number of ticks
+(to make kubelet to restart them for us).
+
+### Disk usage
+
+Container images, containers and logs should consume "space". This usage should
+feed into the system model, and ultimately through statfs calls.

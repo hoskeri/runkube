@@ -476,9 +476,12 @@ type SysfsFile struct {
 }
 
 // SysfsDevices renders the emulated /sys/devices/system tree as regular
-// files. The sandbox materializes these into its rootfs during setup, so the
-// tree needs no seccomp emulation. Content is derived from the model so it
-// stays coherent with /proc/*.
+// files, so the tree needs no seccomp emulation. Setup writes these files
+// into the rootfs twice from the same renderer: the child's boot
+// materialization and the parent's injected copy through the transferred
+// rootfs fd (see Sandbox.bootFiles). Content is derived from the model so it
+// stays coherent with /proc/*; it can be rewritten at runtime via
+// Sandbox.InjectFiles.
 func (s *System) SysfsDevices() []SysfsFile {
 	c := s.CPU
 	var files []SysfsFile

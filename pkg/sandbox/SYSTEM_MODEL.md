@@ -130,6 +130,28 @@ from the `Memory` model, and `distance` as `10` for the single emulated node.
 Because these are real files, `stat(2)`/`statx(2)` succeed and reads resolve
 natively.
 
+## Network identity
+
+The sandbox's network namespace carries one emulated default interface
+(`eth0`, a dummy device) in addition to loopback. Its L2/L3 identity — MAC
+address, private IPv4 and ULA IPv6 — is derived deterministically from the
+machine id by `pkg/netid.FromMachineID` (docs/TODO.md, "Dynamic network
+interface"): predictable across restarts, never hardcoded.
+
+- A machine id that is exactly 16 bytes (32 hex characters) is used as-is;
+  any other value is SHA-256 hashed to 16 bytes
+- **MAC** — the first 6 identity bytes with the unicast bit cleared and the
+  locally-administered bit set, so it can never collide with a real vendor
+  OUI
+- **IPv4** — `10.<b12>.<b13>.<b14>`, a 10/8 private address
+- **IPv6** — `fd00:<7 groups from the identity>`, a ULA `fd00::/8` address
+- **loopback** — `lo` keeps its kernel-assigned `127.0.0.1/8` and `::1/128`
+
+The interface is created and brought up in `Sandbox.setupNetwork()` during
+boot; `Config.IPAddress`, when set, overrides the derived IPv4. Node/kubelet
+addresses, clusterDNS and the CRI pod sandbox IP derive from the same
+function so the emulated identity is coherent across the stack.
+
 ## Resolution
 
 `System.Resolve()` fills optional fields with defaults, generates a stable boot

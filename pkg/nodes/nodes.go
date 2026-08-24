@@ -2,6 +2,7 @@ package nodes
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"github.com/hoskeri/procman/pkg/termhandler"
 	"github.com/hoskeri/runkube/pkg/cri"
 	"github.com/hoskeri/runkube/pkg/grpcmiddleware"
+	"github.com/hoskeri/runkube/pkg/netid"
 	"github.com/hoskeri/runkube/pkg/ref"
 	"github.com/hoskeri/runkube/pkg/sandbox"
 	"google.golang.org/grpc"
@@ -24,7 +26,6 @@ type Node struct {
 	Root          string `json:"root"`
 	Kubeconfig    string `json:"kubeconfig"`
 	KubeletBinary string `json:"kubelet"`
-	Address       string `json:"address"`
 }
 
 func (c *Node) selfBinary() string {
@@ -38,7 +39,7 @@ func (c *Node) selfBinary() string {
 }
 
 func (c *Node) makeKubeletConfig() error {
-	kc := `
+	kc := fmt.Sprintf(`
 kind: KubeletConfiguration
 apiVersion: "kubelet.config.k8s.io/v1beta1"
 featureGates:
@@ -54,6 +55,7 @@ healthzBindAddress: "127.0.0.1"
 volumePluginDir: ""
 failSwapOn: false
 nodeStatusMaxImages: 0
+oomScoreAdj: 200
 protectKernelDefaults: false
 streamingConnectionIdleTimeout: "1m"
 enableProfilingHandler: false
@@ -66,7 +68,7 @@ rotateCertificates: false
 containerLogMaxSize: "-1"
 cgroupDriver: cgroupfs
 cgroupsPerQOS: false
-clusterDNS: [ "10.0.0.1" ]
+clusterDNS: [ %q ]
 enforceNodeAllocatable: [ "none" ]
 authentication:
   anonymous:
@@ -75,7 +77,7 @@ authentication:
 		enabled: true
 authorization:
 	mode: Webhook
-`
+`, c.nodeAddress())
 	return c.configRef("kubelet-config").Write([]byte(kc))
 }
 
@@ -101,8 +103,12 @@ func (c *Node) ContainerRuntimeEndpoint() string {
 	return "/run/containerd/containerd.sock"
 }
 
+// nodeAddress returns the node's emulated IPv4 address, derived
+// deterministically from the machine id (see netid.FromMachineID) so it is
+// predictable across restarts without being hardcoded. The sandbox's default
+// interface carries the same address.
 func (c *Node) nodeAddress() string {
-	return "10.0.0.1"
+	return netid.FromMachineID(c.MachineID).IPv4.String()
 }
 
 func (c *Node) CRIServer() *process.Process {

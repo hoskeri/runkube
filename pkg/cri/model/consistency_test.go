@@ -18,7 +18,7 @@ func TestSandboxStateReconciledOnAdd(t *testing.T) {
 	r.AddSandbox("sb1", NewSandbox(
 		&criv1.PodSandbox{Id: "sb1", State: criv1.PodSandboxState_SANDBOX_NOTREADY},
 		&criv1.PodSandboxStatus{Id: "sb1", State: criv1.PodSandboxState_SANDBOX_READY,
-			Network: &criv1.PodSandboxNetworkStatus{Ip: "10.0.0.1"}},
+			Network: &criv1.PodSandboxNetworkStatus{Ip: "10.2.3.4"}},
 	))
 
 	got, ok := r.GetSandbox("sb1")
@@ -31,7 +31,7 @@ func TestSandboxStateReconciledOnAdd(t *testing.T) {
 	if got.PodSandboxStatus().State != criv1.PodSandboxState_SANDBOX_NOTREADY {
 		t.Errorf("PodSandboxStatus.State = %v, want NOTREADY (reconciled from PodSandbox)", got.PodSandboxStatus().State)
 	}
-	if ip := got.PodSandboxStatus().GetNetwork().GetIp(); ip != "10.0.0.1" {
+	if ip := got.PodSandboxStatus().GetNetwork().GetIp(); ip != "10.2.3.4" {
 		t.Errorf("status-only fields must survive reconciliation, ip = %q", ip)
 	}
 }

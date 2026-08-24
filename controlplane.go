@@ -362,7 +362,6 @@ func (c *ControlPlane) RunNode(ctx context.Context, nodeName string) error {
 		Kubeconfig:    c.kubeConfigRef(nodeName).Path,
 		KubeletBinary: kp,
 		MachineID:     hex.EncodeToString(h.Sum(nil)[0:16]),
-		Address:       "10.0.0.1",
 	}
 
 	return node.RunSandbox(ctx)
