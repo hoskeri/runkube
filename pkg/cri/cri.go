@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/hoskeri/runkube/pkg/cri/model"
-	"github.com/hoskeri/runkube/pkg/netid"
+	"github.com/hoskeri/runkube/pkg/randid"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -130,7 +130,7 @@ func (b *BuiltinCRIRuntime) RunPodSandbox(ctx context.Context, req *criv1.RunPod
 		Annotations:    np.GetAnnotations(),
 		RuntimeHandler: np.GetRuntimeHandler(),
 		Network: &criv1.PodSandboxNetworkStatus{
-			Ip: netid.FromMachineID(sbid).IPv4.String(),
+			Ip: randid.IPv4(sbid).String(),
 		},
 		Linux: &criv1.LinuxPodSandboxStatus{},
 	}

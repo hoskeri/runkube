@@ -1,13 +1,13 @@
 package config
 
 import (
-	"crypto/sha256"
 	"fmt"
 	"net/netip"
 	"os"
 	"path/filepath"
 	"regexp"
 
+	"github.com/hoskeri/runkube/pkg/randid"
 	"github.com/spf13/pflag"
 )
 
@@ -22,15 +22,6 @@ type Config struct {
 	Nodes               []string     `json:"nodes"`
 }
 
-func generateULA(seed string) netip.Prefix {
-	hash := sha256.Sum256([]byte(seed))
-	var addr [16]byte
-	addr[0] = 0xfd
-	copy(addr[1:6], hash[0:5])
-	copy(addr[6:8], hash[5:7])
-	return netip.PrefixFrom(netip.AddrFrom16(addr), 64)
-}
-
 // Parse parses the command line flags and returns the configuration.
 func Parse() (Config, []string) {
 	fs := pflag.NewFlagSet("runkube", pflag.ExitOnError)
@@ -42,13 +33,13 @@ func Parse() (Config, []string) {
 	fs.StringVar(&c.Name, "name", "default", "cluster name")
 	fs.StringVar(&c.Root, "root", "", "root directory (defaults to ${XDG_STATE_HOME}/runkube/NAME or ~/.local/state/runkube/NAME)")
 	fs.StringVar(&c.ExternalHostname, "external-hostname", "", "external hostname (defaults to NAME.runkube.local)")
-	fs.StringVar(&serviceAddressRange, "service-address-range", "", "service address range (defaults to a random /64 ULA based on cluster name)")
+	fs.StringVar(&serviceAddressRange, "service-address-range", "", "service address range (defaults to a /64 ULA derived from the cluster name)")
 	fs.StringSliceVar(&c.Nodes, "node", []string{"node-a"}, "node names (can be specified multiple times)")
 
 	fs.Parse(os.Args[1:])
 
 	if serviceAddressRange == "" {
-		c.ServiceAddressRange = generateULA(c.Name)
+		c.ServiceAddressRange = randid.ULA(c.Name)
 	} else {
 		var err error
 		c.ServiceAddressRange, err = netip.ParsePrefix(serviceAddressRange)

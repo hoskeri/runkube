@@ -134,9 +134,17 @@ natively.
 
 The sandbox's network namespace carries one emulated default interface
 (`eth0`, a dummy device) in addition to loopback. Its L2/L3 identity — MAC
-address, private IPv4 and ULA IPv6 — is derived deterministically from the
-machine id by `pkg/netid.FromMachineID` (docs/TODO.md, "Dynamic network
-interface"): predictable across restarts, never hardcoded.
+address, private IPv4 and ULA IPv6 — is derived deterministically from a
+seed (here the machine id) by `pkg/randid` (`randid.MAC`, `randid.IPv4`,
+`randid.IPv6`; docs/TODO.md, "Dynamic network interface"): predictable across
+restarts, never hardcoded. The package is generic — the same functions derive
+MACs, IPv4/IPv6, ULA prefixes, byte sequences and strings from any stable
+identifier (node names, object ids, …).
+
+`randid` values are deterministic and **not secret** (see the package
+godoc's Security considerations): they exist so emulated identities are
+stable and can be stated in configs and tests — never for credentials,
+tokens, or anything that must be unpredictable.
 
 - A machine id that is exactly 16 bytes (32 hex characters) is used as-is;
   any other value is SHA-256 hashed to 16 bytes
@@ -150,7 +158,9 @@ interface"): predictable across restarts, never hardcoded.
 The interface is created and brought up in `Sandbox.setupNetwork()` during
 boot; `Config.IPAddress`, when set, overrides the derived IPv4. Node/kubelet
 addresses, clusterDNS and the CRI pod sandbox IP derive from the same
-function so the emulated identity is coherent across the stack.
+package so the emulated identity is coherent across the stack. `randid.ULA`
+produces the RFC 4193 /64 prefix shape also used by `pkg/config` for the
+service address range.
 
 ## Resolution
 

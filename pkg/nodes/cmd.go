@@ -2,10 +2,8 @@ package nodes
 
 import (
 	"context"
-	"os"
-
-	"github.com/spf13/pflag"
 	"log/slog"
+	"os"
 )
 
 func Main(ctx context.Context, args ...string) {
@@ -18,24 +16,23 @@ func Main(ctx context.Context, args ...string) {
 		}
 	}
 
-	flags := pflag.NewFlagSet("", pflag.ContinueOnError)
-
-	nodeName := flags.String("name", "", "node name")
-	rootDir := flags.String("root", "", "root directory for this node")
-	kubeConfig := flags.String("kubeconfig", "", "kubeconfig for this node")
-	kubeletBinary := flags.String("kubelet", "", "path to the kubelet binary")
-	machineID := flags.String("machineID", "", "machine uuid")
-	flags.Parse(args)
-
-	n := &Node{
-		Name:          *nodeName,
-		Root:          *rootDir,
-		Kubeconfig:    *kubeConfig,
-		KubeletBinary: *kubeletBinary,
-		MachineID:     *machineID,
+	// The node configuration arrives from the parent control plane as a
+	// serialized environment variable (see Node.EnvEntry) instead of command
+	// line flags.
+	n, err := NodeFromEnv()
+	if err != nil {
+		slog.Error("nodes.Main", "err", err)
+		os.Exit(1)
+	}
+	if err := n.Validate(); err != nil {
+		slog.Error("nodes.Main", "err", err)
+		os.Exit(1)
 	}
 
-	cmd := flags.Arg(0)
+	var cmd = ""
+	if len(args) > 0 {
+		cmd = args[0]
+	}
 	if cmd == "" {
 		cmd = "sandbox"
 	}

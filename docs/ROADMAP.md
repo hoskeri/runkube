@@ -205,7 +205,7 @@ Already done (kept honest in the roadmap):
 - Sandbox single-roundtrip setup and dynamic file injection
 - Dynamic network interface — the default interface (`eth0`) gets a MAC,
   IPv4 and IPv6 address derived deterministically from the machine id
-  (`pkg/netid`); the hardcoded 10.0.0.1 is removed from node/kubelet/CRI
+  (`pkg/randid`); the hardcoded 10.0.0.1 is removed from node/kubelet/CRI
   addresses
 
 Remaining CRI work:

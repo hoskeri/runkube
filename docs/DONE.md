@@ -7,12 +7,13 @@ Items from docs/TODO.md should be moved here.
 ### Dynamic network interface
 
 Status: **done** — implemented 2026-08-30; derivation lives in the new
-`pkg/netid` package.
+`pkg/randid` package.
 
 The sandbox's default interface (`eth0`, a dummy device created in the
 sandbox network namespace) is configured with a MAC address, a private IPv4
 address and a ULA IPv6 address derived deterministically from the machine id
-(`netid.FromMachineID`): a machine id that is exactly 16 bytes (32 hex chars)
+(`randid.MAC`, `randid.IPv4`, `randid.IPv6`): a machine id that is exactly 16
+bytes (32 hex chars)
 is used as-is, anything else is SHA-256 hashed. The MAC is always unicast +
 locally administered (can never collide with a real OUI), IPv4 is a 10/8
 address, IPv6 is a `fd00::/8` ULA. Loopback retains its kernel-assigned

@@ -1,19 +1,24 @@
 package nodes
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net"
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 
 	"github.com/hoskeri/procman/pkg/process"
 	"github.com/hoskeri/procman/pkg/termhandler"
 	"github.com/hoskeri/runkube/pkg/cri"
 	"github.com/hoskeri/runkube/pkg/grpcmiddleware"
-	"github.com/hoskeri/runkube/pkg/netid"
+	"github.com/hoskeri/runkube/pkg/randid"
 	"github.com/hoskeri/runkube/pkg/ref"
 	"github.com/hoskeri/runkube/pkg/sandbox"
 	"google.golang.org/grpc"
@@ -26,6 +31,92 @@ type Node struct {
 	Root          string `json:"root"`
 	Kubeconfig    string `json:"kubeconfig"`
 	KubeletBinary string `json:"kubelet"`
+}
+
+// NodeEnvVar carries the serialized node configuration from the control plane
+// (parent) to node processes (child), mirroring how the sandbox configuration
+// is passed from parent to child.
+const NodeEnvVar = "RUNKUBE_NODE"
+
+// encodeNode serializes a Node for transfer as an environment variable.
+func encodeNode(n *Node) ([]byte, error) {
+	return json.Marshal(n)
+}
+
+// decodeNode parses a Node serialized by encodeNode.
+func decodeNode(d []byte) (*Node, error) {
+	n := &Node{}
+	dec := json.NewDecoder(bytes.NewReader(d))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(n); err != nil {
+		return nil, err
+	}
+
+	return n, nil
+}
+
+// NodeFromEnv returns the Node the parent control plane serialized into the
+// environment (see Node.EnvEntry), or an error when it is absent or invalid.
+func NodeFromEnv() (*Node, error) {
+	enc := os.Getenv(NodeEnvVar)
+	if enc == "" {
+		return nil, fmt.Errorf("nodes.NodeFromEnv: %s not set", NodeEnvVar)
+	}
+
+	d, err := base64.StdEncoding.DecodeString(enc)
+	if err != nil {
+		return nil, err
+	}
+
+	return decodeNode(d)
+}
+
+// EnvEntry returns the environment entry ("RUNKUBE_NODE=...") carrying this
+// node's serialized configuration, for parent-to-child transfer.
+func (c *Node) EnvEntry() (string, error) {
+	b, err := encodeNode(c)
+	if err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf("%s=%s", NodeEnvVar, base64.StdEncoding.EncodeToString(b)), nil
+}
+
+// Validate verifies that the Node is complete and well-formed: every field
+// must be set, machineID must be a 16-byte hex string, and paths must be
+// absolute. It exists to catch parent-to-child transfer mistakes automatically
+// (e.g. a field never set, like a flag dropped from a command line, or one
+// corrupted in transit) instead of surfacing later as confusing runtime
+// failures such as files silently written to relative paths.
+func (c *Node) Validate() error {
+	if c.Name == "" {
+		return fmt.Errorf("nodes.Node.Validate: name not set")
+	}
+	if c.MachineID == "" {
+		return fmt.Errorf("nodes.Node.Validate: machineID not set")
+	}
+	if len(c.MachineID) != 2*16 {
+		return fmt.Errorf("nodes.Node.Validate: machineID %q must be 16 bytes (32 hex chars)", c.MachineID)
+	}
+	if _, err := hex.DecodeString(c.MachineID); err != nil {
+		return fmt.Errorf("nodes.Node.Validate: machineID %q is not hex: %w", c.MachineID, err)
+	}
+	if c.Root == "" {
+		return fmt.Errorf("nodes.Node.Validate: root not set")
+	}
+	if c.Kubeconfig == "" {
+		return fmt.Errorf("nodes.Node.Validate: kubeconfig not set")
+	}
+	if c.KubeletBinary == "" {
+		return fmt.Errorf("nodes.Node.Validate: kubelet not set")
+	}
+	for _, p := range []string{c.Root, c.Kubeconfig, c.KubeletBinary} {
+		if !strings.HasPrefix(p, "/") {
+			return fmt.Errorf("nodes.Node.Validate: path %q must be absolute", p)
+		}
+	}
+
+	return nil
 }
 
 func (c *Node) selfBinary() string {
@@ -88,6 +179,9 @@ func (c *Node) Kubelet() *process.Process {
 			"kubelet",
 			"--config", c.configRef("kubelet-config").Path,
 			"--kubeconfig", "/etc/kubernetes/kubelet.kubeconfig",
+			// TODO automatically derive node-ip(s) from sandbox environment
+			// Kubelet looks for an interface with a default route
+			// which is used to grab addresses. So sandbox.go should set up a default route.
 			"--node-ip", c.nodeAddress(),
 		},
 	}
@@ -104,20 +198,26 @@ func (c *Node) ContainerRuntimeEndpoint() string {
 }
 
 // nodeAddress returns the node's emulated IPv4 address, derived
-// deterministically from the machine id (see netid.FromMachineID) so it is
-// predictable across restarts without being hardcoded. The sandbox's default
-// interface carries the same address.
+// deterministically from the machine id (see randid.IPv4) so it is predictable
+// across restarts without being hardcoded. The sandbox's default interface
+// carries the same address.
 func (c *Node) nodeAddress() string {
-	return netid.FromMachineID(c.MachineID).IPv4.String()
+	return randid.IPv4(c.MachineID).String()
 }
 
 func (c *Node) CRIServer() *process.Process {
+	// The criserver process re-executes this binary (selfBinary) and re-enters
+	// nodes.Main, which reconstructs the Node from the environment, so the
+	// serialized node config must be passed down like the parent does.
+	env, err := c.EnvEntry()
+	if err != nil {
+		panic(err)
+	}
+
 	return &process.Process{
-		Tag: "criserver",
-		CmdArgs: []string{
-			c.selfBinary(),
-			"criserver",
-		},
+		Tag:     "criserver",
+		CmdArgs: []string{c.selfBinary(), "criserver"},
+		Environ: []string{env},
 	}
 }
 
@@ -167,6 +267,14 @@ func (c *Node) RunSandbox(ctx context.Context) error {
 }
 
 func (c *Node) sandboxConfig() (*sandbox.Config, error) {
+	// The serialized node configuration rides along in the sandbox
+	// environment so the node process inside the sandbox can reconstruct
+	// this Node without command line flags.
+	env, err := c.EnvEntry()
+	if err != nil {
+		return nil, err
+	}
+
 	return &sandbox.Config{
 		Version:   "v1",
 		Hostname:  c.Name,
@@ -176,6 +284,7 @@ func (c *Node) sandboxConfig() (*sandbox.Config, error) {
 		Env: []string{
 			"HOME=/root",
 			"PATH=/sbin:/usr/sbin:/usr/local/bin:/usr/bin:/bin",
+			env,
 		},
 		Payload: []sandbox.Payload{
 			{Target: "/etc/kubernetes/kubelet.kubeconfig", Source: sandbox.PayloadSource{Type: "bind", Value: c.Kubeconfig}},

@@ -13,7 +13,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/hoskeri/runkube/pkg/netid"
+	"github.com/hoskeri/runkube/pkg/randid"
 	"github.com/hoskeri/runkube/pkg/sandbox/fdchan"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
@@ -76,8 +76,8 @@ type Config struct {
 	Egress string `json:"egress,omitempty"`
 	// IPAddress optionally overrides the IPv4 address of the sandbox's
 	// default interface. When empty, the address is derived from the
-	// machine id (netid.FromMachineID) together with the MAC and IPv6
-	// addresses, so the identity is predictable but not hardcoded.
+	// machine id (randid.IPv4) together with the MAC and IPv6 addresses, so
+	// the identity is predictable but not hardcoded.
 	IPAddress string `json:"ipAddress"`
 	// System overrides the emulated hardware/resources presented through
 	// /proc, /sys and uname(2). When nil, DefaultSystem is used.
@@ -203,7 +203,7 @@ const defaultInterface = "eth0"
 // interface gets its kernel-assigned 127.0.0.1/8 and ::1/128 addresses, and
 // the default interface (eth0, a dummy device) is created with a MAC, IPv4
 // and IPv6 address derived deterministically from the machine id
-// (netid.FromMachineID), so the identity is predictable across restarts but
+// (randid.MAC/IPv4/IPv6), so the identity is predictable across restarts but
 // not hardcoded. Config.IPAddress, when set, overrides the derived IPv4.
 func (s *Sandbox) setupNetwork() error {
 	if s.lastError != nil {
@@ -219,15 +219,16 @@ func (s *Sandbox) setupNetwork() error {
 			return fmt.Errorf("link up %q: %w", "lo", err)
 		}
 
-		id := netid.FromMachineID(s.machineID())
-		ipv4 := id.IPv4
+		mac := randid.MAC(s.machineID())
+		ipv4 := randid.IPv4(s.machineID())
 		if ip := net.ParseIP(s.config.IPAddress); ip != nil {
 			ipv4 = ip
 		}
+		ipv6 := randid.IPv6(s.machineID())
 
 		attrs := netlink.NewLinkAttrs()
 		attrs.Name = defaultInterface
-		attrs.HardwareAddr = id.MAC
+		attrs.HardwareAddr = mac
 		if err := netlink.LinkAdd(&netlink.Dummy{LinkAttrs: attrs}); err != nil {
 			return fmt.Errorf("create %q: %w", defaultInterface, err)
 		}
@@ -241,7 +242,7 @@ func (s *Sandbox) setupNetwork() error {
 
 		for _, a := range []*netlink.Addr{
 			{IPNet: &net.IPNet{IP: ipv4, Mask: net.CIDRMask(24, 32)}},
-			{IPNet: &net.IPNet{IP: id.IPv6, Mask: net.CIDRMask(64, 128)}},
+			{IPNet: &net.IPNet{IP: ipv6, Mask: net.CIDRMask(64, 128)}},
 		} {
 			if err := netlink.AddrAdd(link, a); err != nil {
 				return fmt.Errorf("addr add %v: %w", a.IPNet, err)

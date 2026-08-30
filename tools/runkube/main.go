@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -33,8 +32,14 @@ func main() {
 		},
 	})))
 
+	// A process re-executed as the sandbox-internal breakbulk binary is a node
+	// or sandbox helper: its entire lifetime is governed by nodes.Main, which
+	// itself exits on error and replaces the process (syscall.Exec) for long-
+	// lived commands. Return unconditionally so a clean return can never fall
+	// through into the control plane startup below.
 	if os.Args[0] == "/usr/bin/breakbulk" {
 		nodes.Main(ctx, os.Args[1:]...)
+		return
 	}
 
 	conf, args := config.Parse()
@@ -66,13 +71,7 @@ func main() {
 	case "webhook":
 		fatally(ctx, "c.RunWebhook", c.RunWebhook)
 	case "node":
-		fatally(ctx, "c.RunNode", func(ctx context.Context) error {
-			if len(args) != 2 {
-				return fmt.Errorf("requires node name")
-			}
-
-			return c.RunNode(ctx, args[1])
-		})
+		fatally(ctx, "c.RunNode", c.RunNode)
 	case "kubectl":
 		if err := c.KubectlExec(os.Environ(), args); err != nil {
 			os.Exit(1)

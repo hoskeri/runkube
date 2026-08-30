@@ -2,6 +2,8 @@ package config
 
 import (
 	"testing"
+
+	"github.com/hoskeri/runkube/pkg/randid"
 )
 
 func TestGenerateULA(t *testing.T) {
@@ -24,24 +26,24 @@ func TestGenerateULA(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := generateULA(tt.seed)
+			got := randid.ULA(tt.seed)
 			if got.String() != tt.want {
-				t.Errorf("generateULA() = %v, want %v", got, tt.want)
+				t.Errorf("ULA() = %v, want %v", got, tt.want)
 			}
 			if !got.Addr().Is6() {
-				t.Errorf("generateULA() = %v, not an IPv6 address", got)
+				t.Errorf("ULA() = %v, not an IPv6 address", got)
 			}
 			if got.Addr().As16()[0] != 0xfd {
-				t.Errorf("generateULA() = %v, does not start with 0xfd", got)
+				t.Errorf("ULA() = %v, does not start with 0xfd", got)
 			}
 		})
 	}
 }
 
 func TestGenerateULADifferent(t *testing.T) {
-	ula1 := generateULA("cluster1")
-	ula2 := generateULA("cluster2")
+	ula1 := randid.ULA("cluster1")
+	ula2 := randid.ULA("cluster2")
 	if ula1 == ula2 {
-		t.Errorf("generateULA() produced same ULA for different seeds: %v", ula1)
+		t.Errorf("ULA() produced same ULA for different seeds: %v", ula1)
 	}
 }

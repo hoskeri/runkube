@@ -337,31 +337,63 @@ func (c *ControlPlane) setupNode(nodeName string) error {
 	return nil
 }
 
-func (c *ControlPlane) nodeProcesses() []*process.Process {
-	ps := []*process.Process{}
-	for _, n := range c.Nodes {
-		ps = append(ps, &process.Process{
-			Tag:     n,
-			CmdArgs: []string{c.selfBinary(), "node", n},
-		})
-	}
-
-	return ps
-}
-
-// RunNode runs a Kubernetes node.
-func (c *ControlPlane) RunNode(ctx context.Context, nodeName string) error {
+// node returns the Node descriptor for a node: the kubelet binary is
+// discovered, and the machine id is derived deterministically from the node
+// name so it stays stable across restarts.
+func (c *ControlPlane) node(nodeName string) *nodes.Node {
 	kp, err := exec.LookPath("kubelet")
 	if err != nil {
 		panic(err)
 	}
 	h := crypto.SHA224.New()
 	h.Write([]byte(nodeName))
-	node := &nodes.Node{
+
+	return &nodes.Node{
 		Name:          nodeName,
+		Root:          "/",
 		Kubeconfig:    c.kubeConfigRef(nodeName).Path,
 		KubeletBinary: kp,
 		MachineID:     hex.EncodeToString(h.Sum(nil)[0:16]),
+	}
+}
+
+func (c *ControlPlane) nodeProcesses() []*process.Process {
+	ps := []*process.Process{}
+	for _, n := range c.Nodes {
+		// The node parameters travel to the child as a serialized environment
+		// variable instead of command line flags (see nodes.EnvEntry).
+		node := c.node(n)
+		if err := node.Validate(); err != nil {
+			// A node we constructed ourselves must always validate; a failure
+			// here is a programming error, not a runtime condition.
+			panic(err)
+		}
+		env, err := node.EnvEntry()
+		if err != nil {
+			panic(err)
+		}
+
+		ps = append(ps, &process.Process{
+			Tag:     n,
+			CmdArgs: []string{c.selfBinary(), "node"},
+			Environ: []string{env},
+		})
+	}
+
+	return ps
+}
+
+// RunNode runs a Kubernetes node. The node configuration is serialized by the
+// parent control plane into the environment (see nodeProcesses and
+// nodes.EnvEntry) and deserialized here, mirroring how the sandbox
+// configuration is passed from parent to child.
+func (c *ControlPlane) RunNode(ctx context.Context) error {
+	node, err := nodes.NodeFromEnv()
+	if err != nil {
+		return err
+	}
+	if err := node.Validate(); err != nil {
+		return err
 	}
 
 	return node.RunSandbox(ctx)
