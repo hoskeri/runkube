@@ -57,9 +57,14 @@ func (c *ControlPlane) Run(ctx context.Context) error {
 	return fm.Run(ctx)
 }
 
-func (c *ControlPlane) logLevelFor(_ string) slog.Level {
-	return slog.LevelError
+// logLevelFor returns the effective log level for a component tag: an
+// explicit --log-level override wins, otherwise the default level applies.
+func (c *ControlPlane) logLevelFor(tag string) slog.Level {
+	if lvl, ok := c.LogLevels[tag]; ok {
+		return lvl
+	}
 
+	return c.LogLevel
 }
 
 func (c *ControlPlane) hostname(tag string) string {
@@ -354,6 +359,7 @@ func (c *ControlPlane) node(nodeName string) *nodes.Node {
 		Kubeconfig:    c.kubeConfigRef(nodeName).Path,
 		KubeletBinary: kp,
 		MachineID:     hex.EncodeToString(h.Sum(nil)[0:16]),
+		LogLevel:      c.logLevelFor(nodeName),
 	}
 }
 
@@ -374,9 +380,10 @@ func (c *ControlPlane) nodeProcesses() []*process.Process {
 		}
 
 		ps = append(ps, &process.Process{
-			Tag:     n,
-			CmdArgs: []string{c.selfBinary(), "node"},
-			Environ: []string{env},
+			Tag:      n,
+			LogLevel: c.logLevelFor(n),
+			CmdArgs:  []string{c.selfBinary(), "node"},
+			Environ:  []string{env},
 		})
 	}
 

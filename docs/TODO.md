@@ -7,11 +7,6 @@
 
 ## Runkube
 
-### Log level per component
-
-Everything is silent (LevelError) by default. But we should be able to override
-the log level per-component. Propagate the log level to nodes as well.
-
 ### Lazy initialization
 
 Everything is re(initialized) at startup with `c.Init(). We want to be lazy.
@@ -52,3 +47,22 @@ Container processes should sometimes stop after a realistic number of ticks
 
 Container images, containers and logs should consume "space". This usage should
 feed into the system model, and ultimately through statfs calls.
+
+## Testing
+
+### Integration test
+
+Based on `make run`, add an integration-test target that runs all the
+components, with logging enabled.
+
+## Process
+
+### Process management
+
+User should be able provide an additional Procfile to run custom along side
+runkube components.
+
+These process should have the following set:
+
+- KUBECONFIG pointing to the kubernetes api.
+- RUNKUBE_PATH pointing to the root dir of the cluster.

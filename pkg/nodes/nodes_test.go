@@ -1,6 +1,7 @@
 package nodes
 
 import (
+	"log/slog"
 	"os"
 	"strings"
 	"testing"
@@ -15,6 +16,7 @@ func sample() *Node {
 		Root:          "/",
 		Kubeconfig:    "/etc/kubernetes/kubelet.kubeconfig",
 		KubeletBinary: "/usr/bin/kubelet",
+		LogLevel:      slog.LevelError,
 	}
 }
 
@@ -30,7 +32,8 @@ func TestEncodeDecodeRoundtrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got.Name != n.Name || got.MachineID != n.MachineID || got.Root != n.Root ||
-		got.Kubeconfig != n.Kubeconfig || got.KubeletBinary != n.KubeletBinary {
+		got.Kubeconfig != n.Kubeconfig || got.KubeletBinary != n.KubeletBinary ||
+		got.LogLevel != n.LogLevel {
 		t.Errorf("roundtrip mismatch")
 	}
 }
@@ -59,7 +62,8 @@ func TestEnvEntryRoundtrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got.Name != n.Name || got.MachineID != n.MachineID || got.Root != n.Root ||
-		got.Kubeconfig != n.Kubeconfig || got.KubeletBinary != n.KubeletBinary {
+		got.Kubeconfig != n.Kubeconfig || got.KubeletBinary != n.KubeletBinary ||
+		got.LogLevel != n.LogLevel {
 		t.Errorf("NodeFromEnv mismatch")
 	}
 }

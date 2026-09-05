@@ -54,6 +54,28 @@ Instead of multiple fdchan roundtrips, lets just perform one "setup" RPC. the
 request passes metadata and file descriptors to the child, and the child
 responds with other metadata and file descriptors to the parent.
 
+## Runkube
+
+### Log level per component
+
+Status: **done** — implemented 2026-09-05.
+
+Component log output is configurable instead of always silent:
+
+- New `--log-level` flag on the `runkube` tool: a bare level
+  (`error|warn|info|debug`, default `error`) sets the default for all
+  components; comma-separated `tag=level` pairs override per component, e.g.
+  `--log-level=info,api=debug,node-a=error`. Tags are `etcd`, `api`,
+  `controller`, `scheduler`, `webhook`, `kms`, `jwtsigner` and the node names.
+- `ControlPlane.logLevelFor(tag)` resolves the effective level (override or
+  default) from the config and feeds the per-process `process.Process.LogLevel`
+  used by procman's termhandler to filter each component's output.
+- The level propagates to nodes through the existing `RUNKUBE_NODE`
+  serialization: `nodes.Node` gained a `LogLevel` field, the node process
+  carries it, and the in-sandbox node formation uses it as its sink level, so
+  `kubelet`/`criserver` output is filtered at the node's level too.
+- Config parsing and roundtrips are covered by `pkg/config`/`pkg/nodes` tests.
+
 ## CRI model
 
 ### Runtime, Sandbox, Image and Container State Machines

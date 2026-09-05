@@ -26,11 +26,14 @@ import (
 )
 
 type Node struct {
-	Name          string `json:"name"`
-	MachineID     string `json:"machineID"`
-	Root          string `json:"root"`
-	Kubeconfig    string `json:"kubeconfig"`
-	KubeletBinary string `json:"kubelet"`
+	Name          string     `json:"name"`
+	MachineID     string     `json:"machineID"`
+	Root          string     `json:"root"`
+	Kubeconfig    string     `json:"kubeconfig"`
+	KubeletBinary string     `json:"kubelet"`
+	// LogLevel is the log level for this node's processes (kubelet and
+	// criserver), propagated from the control plane (see logLevelFor).
+	LogLevel slog.Level `json:"logLevel"`
 }
 
 // NodeEnvVar carries the serialized node configuration from the control plane
@@ -241,7 +244,7 @@ func (c *Node) Run(ctx context.Context) error {
 	fm := &process.Formation{
 		Workdir: c.Root,
 		Sink: slog.New(termhandler.New(os.Stdout, &termhandler.Options{
-			Level: slog.LevelInfo,
+			Level: c.LogLevel,
 		})),
 		Processes: []*process.Process{
 			c.Kubelet(),
