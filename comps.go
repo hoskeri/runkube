@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"github.com/hoskeri/procman/pkg/process"
+	"github.com/hoskeri/runkube/pkg/pki"
 )
 
 func (c *ControlPlane) selfBinary() string {
@@ -42,14 +43,14 @@ func (c *ControlPlane) Etcd() *process.Process {
 			"--advertise-client-urls", c.internalListenURL(443, ""),
 			"--initial-advertise-peer-urls", c.internalListenURL(443, ""),
 
-			"--cert-file", c.certRef("etcd-serving").certPath,
-			"--key-file", c.certRef("etcd-serving").keyPath,
-			"--peer-cert-file", c.certRef("etcd-serving").certPath,
-			"--peer-key-file", c.certRef("etcd-serving").keyPath,
-			"--peer-client-cert-file", c.certRef("etcd-peer-client").certPath,
-			"--peer-client-key-file", c.certRef("etcd-peer-client").keyPath,
-			"--trusted-ca-file", c.caRef(Etcd).certPath,
-			"--peer-trusted-ca-file", c.caRef(Etcd).certPath,
+			"--cert-file", c.pkiStore().Leaf("etcd-serving").CertPath(),
+			"--key-file", c.pkiStore().Leaf("etcd-serving").KeyPath(),
+			"--peer-cert-file", c.pkiStore().Leaf("etcd-serving").CertPath(),
+			"--peer-key-file", c.pkiStore().Leaf("etcd-serving").KeyPath(),
+			"--peer-client-cert-file", c.pkiStore().Leaf("etcd-peer-client").CertPath(),
+			"--peer-client-key-file", c.pkiStore().Leaf("etcd-peer-client").KeyPath(),
+			"--trusted-ca-file", c.pkiStore().CACertPath(pki.Etcd),
+			"--peer-trusted-ca-file", c.pkiStore().CACertPath(pki.Etcd),
 		},
 	}
 }
@@ -69,19 +70,19 @@ func (c *ControlPlane) APIServer() *process.Process {
 			"--bind-address", c.internalListenAddr().String(),
 			"--secure-port=6443",
 
-			"--tls-cert-file", c.certRef("apiserver-serving").certPath,
-			"--tls-private-key-file", c.certRef("apiserver-serving").keyPath,
+			"--tls-cert-file", c.pkiStore().Leaf("apiserver-serving").CertPath(),
+			"--tls-private-key-file", c.pkiStore().Leaf("apiserver-serving").KeyPath(),
 
-			"--proxy-client-cert-file", c.certRef("apiserver-extension-client").certPath,
-			"--proxy-client-key-file", c.certRef("apiserver-extension-client").keyPath,
+			"--proxy-client-cert-file", c.pkiStore().Leaf("apiserver-extension-client").CertPath(),
+			"--proxy-client-key-file", c.pkiStore().Leaf("apiserver-extension-client").KeyPath(),
 
 			"--external-hostname", c.externalHostname(),
 			"--advertise-address", c.kubernetesServiceAddress(),
 
 			"--etcd-servers", c.unixSocketPath("etcd").String(),
-			"--etcd-cafile", c.caRef(Etcd).certPath,
-			"--etcd-certfile", c.certRef("apiserver-etcd-client").certPath,
-			"--etcd-keyfile", c.certRef("apiserver-etcd-client").keyPath,
+			"--etcd-cafile", c.pkiStore().CACertPath(pki.Etcd),
+			"--etcd-certfile", c.pkiStore().Leaf("apiserver-etcd-client").CertPath(),
+			"--etcd-keyfile", c.pkiStore().Leaf("apiserver-etcd-client").KeyPath(),
 			"--encryption-provider-config", c.configRef("encryption-provider-config").Path,
 			"--runtime-config", "api/all=true",
 
@@ -101,8 +102,8 @@ func (c *ControlPlane) APIServer() *process.Process {
 			"--anonymous-auth=true",
 			"--enable-bootstrap-token-auth=false",
 			"--authentication-token-webhook-config-file", c.kubeConfigRef("authentication-token-webhook").Path,
-			"--client-ca-file", c.caRef(APIClient).certPath,
-			"--requestheader-client-ca-file", c.caRef(RequestHeader).certPath,
+			"--client-ca-file", c.pkiStore().CACertPath(pki.APIClient),
+			"--requestheader-client-ca-file", c.pkiStore().CACertPath(pki.RequestHeader),
 			"--requestheader-extra-headers-prefix=X-Remote-Extra-",
 			"--requestheader-group-headers=X-Remote-Group",
 			"--requestheader-username-headers=X-Remote-User",
@@ -114,9 +115,9 @@ func (c *ControlPlane) APIServer() *process.Process {
 			"--service-account-extend-token-expiration=false",
 			"--service-account-signing-endpoint", c.unixSocketURL("jwtsigner").Opaque,
 
-			"--kubelet-certificate-authority", c.caRef(KubeletServer).certPath,
-			"--kubelet-client-certificate", c.certRef("apiserver-kubelet-client").certPath,
-			"--kubelet-client-key", c.certRef("apiserver-kubelet-client").keyPath,
+			"--kubelet-certificate-authority", c.pkiStore().CACertPath(pki.KubeletServer),
+			"--kubelet-client-certificate", c.pkiStore().Leaf("apiserver-kubelet-client").CertPath(),
+			"--kubelet-client-key", c.pkiStore().Leaf("apiserver-kubelet-client").KeyPath(),
 			"--kubelet-preferred-address-types", "Hostname",
 
 			"--egress-selector-config-file", c.configRef("egress-selector-config").Path,
@@ -139,8 +140,8 @@ func (c *ControlPlane) Controller() *process.Process {
 
 			"--leader-elect=false",
 			"--bind-address", c.internalListenAddr().String(),
-			"--tls-cert-file", c.certRef("controller-manager-server").certPath,
-			"--tls-private-key-file", c.certRef("controller-manager-server").keyPath,
+			"--tls-cert-file", c.pkiStore().Leaf("controller-manager-server").CertPath(),
+			"--tls-private-key-file", c.pkiStore().Leaf("controller-manager-server").KeyPath(),
 
 			"--kubeconfig", c.kubeConfigRef("controller-manager-client").Path,
 			"--authentication-kubeconfig", c.kubeConfigRef("controller-manager-authnz").Path,
@@ -167,8 +168,8 @@ func (c *ControlPlane) Scheduler() *process.Process {
 			"--logging-format=json",
 
 			"--bind-address", c.internalListenAddr().String(),
-			"--tls-cert-file", c.certRef("scheduler-server").certPath,
-			"--tls-private-key-file", c.certRef("scheduler-server").keyPath,
+			"--tls-cert-file", c.pkiStore().Leaf("scheduler-server").CertPath(),
+			"--tls-private-key-file", c.pkiStore().Leaf("scheduler-server").KeyPath(),
 
 			"--leader-elect=false",
 			"--kubeconfig", c.kubeConfigRef("scheduler-client").Path,
@@ -250,9 +251,9 @@ func (c *ControlPlane) CurlExec(env, args []string) error {
 	a := []string{p,
 		"--fail-with-body",
 		"-sSLvo-",
-		"--cacert", c.caRef(APIServer).certPath,
-		"--cert", c.certRef("system-admin").certPath,
-		"--key", c.certRef("system-admin").keyPath,
+		"--cacert", c.pkiStore().CACertPath(pki.APIServer),
+		"--cert", c.pkiStore().Leaf("system-admin").CertPath(),
+		"--key", c.pkiStore().Leaf("system-admin").KeyPath(),
 	}
 	fa := append(a, args...)
 	return syscall.Exec(p, fa, finalEnv)
@@ -262,9 +263,9 @@ func (c *ControlPlane) CurlExec(env, args []string) error {
 func (c *ControlPlane) EtcdCtlExec(env, args []string) error {
 	finalEnv := append(makeSafeEnv(env),
 		fmt.Sprintf("ETCDCTL_ENDPOINTS=%s", c.unixSocketPath("etcd").String()),
-		fmt.Sprintf("ETCDCTL_CACERT=%s", c.caRef(Etcd).certPath),
-		fmt.Sprintf("ETCDCTL_CERT=%s", c.certRef("apiserver-etcd-client").certPath),
-		fmt.Sprintf("ETCDCTL_KEY=%s", c.certRef("apiserver-etcd-client").keyPath),
+		fmt.Sprintf("ETCDCTL_CACERT=%s", c.pkiStore().CACertPath(pki.Etcd)),
+		fmt.Sprintf("ETCDCTL_CERT=%s", c.pkiStore().Leaf("apiserver-etcd-client").CertPath()),
+		fmt.Sprintf("ETCDCTL_KEY=%s", c.pkiStore().Leaf("apiserver-etcd-client").KeyPath()),
 	)
 	p, err := exec.LookPath("etcdctl")
 	if err != nil {

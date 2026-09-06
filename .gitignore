@@ -1,2 +1,3 @@
 _output/*
 go.work
+go.work.sum

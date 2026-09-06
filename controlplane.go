@@ -21,6 +21,7 @@ import (
 	"github.com/hoskeri/runkube/pkg/config"
 	"github.com/hoskeri/runkube/pkg/kapi"
 	"github.com/hoskeri/runkube/pkg/nodes"
+	"github.com/hoskeri/runkube/pkg/pki"
 	"github.com/hoskeri/runkube/pkg/ref"
 	"github.com/hoskeri/runkube/pkg/syncer"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -31,7 +32,7 @@ import (
 type ControlPlane struct {
 	config.Config
 
-	caMap        map[CAName]*CA
+	pkistore     *pki.Store
 	syncer       *syncer.Syncer
 	unixListener bool
 }
@@ -116,18 +117,11 @@ func (c *ControlPlane) internalListenURL(port uint16, path string) string {
 	}).String()
 }
 
-func (c *ControlPlane) caRef(caName CAName) *pkiRef {
-	return &pkiRef{
-		certPath: filepath.Join(c.Root, "etc/kubernetes/pki", "ca", string(caName)+"-ca.crt"),
-		keyPath:  filepath.Join(c.Root, "etc/kubernetes/pki", "ca", string(caName)+"-ca.key"),
+func (c *ControlPlane) pkiStore() *pki.Store {
+	if c.pkistore == nil {
+		c.pkistore = pki.NewStore(filepath.Join(c.Root, "etc/kubernetes/pki"))
 	}
-}
-
-func (c *ControlPlane) certRef(certName string) *pkiRef {
-	return &pkiRef{
-		certPath: filepath.Join(c.Root, "etc/kubernetes/pki", "leaf", certName+".crt"),
-		keyPath:  filepath.Join(c.Root, "etc/kubernetes/pki", "leaf", certName+".key"),
-	}
+	return c.pkistore
 }
 
 func (c *ControlPlane) keySetRef(name string) *jwksRef {
@@ -163,128 +157,170 @@ func (c *ControlPlane) serviceAddressRange() string {
 // Init initializes the control plane by generating certificates and configuration files.
 func (c *ControlPlane) Init(ctx context.Context) error {
 	c.syncer, _ = syncer.NewSyncer()
-	reqs := []*Request{
+
+	// certRequest pairs a named leaf with the CA that signs it.
+	type certRequest struct {
+		name   string
+		signer string
+		req    pki.Request
+	}
+	reqs := []certRequest{
 		{
 			name:   "etcd-serving",
-			signer: Etcd,
-			usages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
-			cn:     c.hostname("etcd-serving"),
-			san:    []string{path.Base(c.unixSocketPath("etcd").Path)},
+			signer: pki.Etcd,
+			req: pki.Request{
+				CN:       c.hostname("etcd-serving"),
+				DNSNames: []string{path.Base(c.unixSocketPath("etcd").Path)},
+				Usages:   []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+			},
 		},
 		{
 			name:   "etcd-peer-client",
-			signer: Etcd,
-			cn:     c.hostname("etcd-peer-client"),
-			usages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+			signer: pki.Etcd,
+			req: pki.Request{
+				CN:     c.hostname("etcd-peer-client"),
+				Usages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+			},
 		},
 		{
 			name:   "apiserver-etcd-client",
-			signer: Etcd,
-			cn:     c.hostname("etcd-client"),
-			usages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+			signer: pki.Etcd,
+			req: pki.Request{
+				CN:     c.hostname("etcd-client"),
+				Usages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+			},
 		},
 		{
 			name:   "webhook-server",
-			signer: WebhookServer,
-			cn:     c.hostname("webhook"),
-			usages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-			ip:     []netip.Addr{c.internalListenAddr()},
-			san: []string{
-				"api-runkube-internal.kube-system.svc",
-				c.hostname("authentication-webhook"),
-				c.hostname("authorization-webhook"),
-				c.hostname("mutating-webhook"),
-				c.hostname("validating-webhook"),
-				c.hostname("audit-webhook"),
+			signer: pki.WebhookServer,
+			req: pki.Request{
+				CN:      c.hostname("webhook"),
+				Usages:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+				IPAddrs: []netip.Addr{c.internalListenAddr()},
+				DNSNames: []string{
+					"api-runkube-internal.kube-system.svc",
+					c.hostname("authentication-webhook"),
+					c.hostname("authorization-webhook"),
+					c.hostname("mutating-webhook"),
+					c.hostname("validating-webhook"),
+					c.hostname("audit-webhook"),
+				},
 			},
 		},
 		{
 			name:   "apiserver-serving",
-			signer: APIServer,
-			cn:     c.hostname("apiserver"),
-			usages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-			san:    []string{c.hostname("apiserver"), c.externalHostname()},
-			ip:     []netip.Addr{c.internalListenAddr()},
+			signer: pki.APIServer,
+			req: pki.Request{
+				CN:       c.hostname("apiserver"),
+				Usages:   []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+				DNSNames: []string{c.hostname("apiserver"), c.externalHostname()},
+				IPAddrs:  []netip.Addr{c.internalListenAddr()},
+			},
 		},
 		{
 			name:   "apiserver-kubelet-client",
-			signer: APIClient,
-			usages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
-			cn:     "system:kubelet-apiserver-client",
+			signer: pki.APIClient,
+			req: pki.Request{
+				Usages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+				CN:     "system:kubelet-apiserver-client",
+			},
 		},
 		{
 			name:   "apiserver-extension-client",
-			signer: ExtensionAPIServer,
-			usages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
-			cn:     "system:apiserver-extension-client",
+			signer: pki.ExtensionAPIServer,
+			req: pki.Request{
+				Usages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+				CN:     "system:apiserver-extension-client",
+			},
 		},
 		{
 			name:   "requestheader-client",
-			signer: RequestHeader,
-			usages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
-			cn:     "system:requestheader-client",
+			signer: pki.RequestHeader,
+			req: pki.Request{
+				Usages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+				CN:     "system:requestheader-client",
+			},
 		},
 		{
 			name:   "kubelet-server-unused",
-			signer: KubeletServer,
-			cn:     "kubelet-server-unused",
+			signer: pki.KubeletServer,
+			req: pki.Request{
+				CN: "kubelet-server-unused",
+			},
 		},
 		{
 			name:   "system-admin",
-			signer: APIClient,
-			usages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
-			cn:     "system:system-admin",
-			o:      []string{"system:masters"},
+			signer: pki.APIClient,
+			req: pki.Request{
+				Usages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+				CN:     "system:system-admin",
+				Org:    []string{"system:masters"},
+			},
 		},
 		{
 			name:   "controller-manager-client",
-			signer: APIClient,
-			usages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
-			cn:     "system:kube-controller-manager",
+			signer: pki.APIClient,
+			req: pki.Request{
+				Usages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+				CN:     "system:kube-controller-manager",
+			},
 		},
 		{
 			name:   "controller-manager-authnz",
-			signer: APIClient,
-			usages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
-			cn:     "system:controller-manager-authnz",
+			signer: pki.APIClient,
+			req: pki.Request{
+				Usages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+				CN:     "system:controller-manager-authnz",
+			},
 		},
 		{
 			name:   "controller-manager-server",
-			signer: APIClient,
-			usages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-			cn:     "system:kube-controller-manager",
-			san:    []string{c.hostname("controller-manager-server")},
-			ip:     []netip.Addr{c.internalListenAddr()},
+			signer: pki.APIClient,
+			req: pki.Request{
+				Usages:   []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+				CN:       "system:kube-controller-manager",
+				DNSNames: []string{c.hostname("controller-manager-server")},
+				IPAddrs:  []netip.Addr{c.internalListenAddr()},
+			},
 		},
 		{
 			name:   "scheduler-client",
-			signer: APIClient,
-			usages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
-			cn:     "system:kube-scheduler",
+			signer: pki.APIClient,
+			req: pki.Request{
+				Usages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+				CN:     "system:kube-scheduler",
+			},
 		},
 		{
 			name:   "scheduler-server",
-			signer: APIClient,
-			usages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-			cn:     "system:kube-scheduler",
-			san:    []string{c.hostname("scheduler-server")},
-			ip:     []netip.Addr{c.internalListenAddr()},
+			signer: pki.APIClient,
+			req: pki.Request{
+				Usages:   []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+				CN:       "system:kube-scheduler",
+				DNSNames: []string{c.hostname("scheduler-server")},
+				IPAddrs:  []netip.Addr{c.internalListenAddr()},
+			},
 		},
 		{
 			name:   "scheduler-authnz",
-			signer: APIClient,
-			usages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
-			cn:     "system:scheduler-authnz",
+			signer: pki.APIClient,
+			req: pki.Request{
+				Usages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+				CN:     "system:scheduler-authnz",
+			},
 		},
 	}
 
 	for _, r := range reqs {
-		if err := c.CA(r.signer).Certificate(c.certRef(r.name), r); err != nil {
+		ca, err := c.pkiStore().CA(r.signer)
+		if err != nil {
 			return err
 		}
-
-		if r.signer == APIClient {
-			if err := c.makeAPIKubeconfig(r.name, c.certRef(r.name)); err != nil {
+		if _, err := ca.Issue(r.name, r.req); err != nil {
+			return err
+		}
+		if r.signer == pki.APIClient {
+			if err := c.makeAPIKubeconfig(r.name, c.pkiStore().Leaf(r.name)); err != nil {
 				return err
 			}
 		}
@@ -323,19 +359,19 @@ func (c *ControlPlane) Init(ctx context.Context) error {
 }
 
 func (c *ControlPlane) setupNode(nodeName string) error {
-	r := &Request{
-		name:   nodeName,
-		signer: APIClient,
-		usages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
-		cn:     fmt.Sprintf("system:node:%s", nodeName),
-		o:      []string{"system:nodes"},
+	ca, err := c.pkiStore().CA(pki.APIClient)
+	if err != nil {
+		return err
 	}
-
-	if err := c.CA(r.signer).Certificate(c.certRef(nodeName), r); err != nil {
+	if _, err := ca.Issue(nodeName, pki.Request{
+		CN:     fmt.Sprintf("system:node:%s", nodeName),
+		Org:    []string{"system:nodes"},
+		Usages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}); err != nil {
 		return err
 	}
 
-	if err := c.makeNodeKubeconfig(nodeName, c.certRef(nodeName)); err != nil {
+	if err := c.makeNodeKubeconfig(nodeName, c.pkiStore().Leaf(nodeName)); err != nil {
 		return err
 	}
 
@@ -407,6 +443,11 @@ func (c *ControlPlane) RunNode(ctx context.Context) error {
 }
 
 func (c *ControlPlane) makeExtensionKubeconfig(name string, srv *url.URL) error {
+	ca, err := c.pkiStore().CA(pki.WebhookServer)
+	if err != nil {
+		return err
+	}
+
 	kc := fmt.Sprintf(`
 apiVersion: v1
 kind: Config
@@ -428,15 +469,19 @@ users:
     client-key-data: %q
 `,
 		srv.String(),
-		c.caRef(WebhookServer).CertBase64String(),
-		c.certRef("apiserver-extension-client").CertBase64String(),
-		c.certRef("apiserver-extension-client").KeyBase64String(),
+		ca.CertBase64(),
+		c.pkiStore().Leaf("apiserver-extension-client").CertBase64(),
+		c.pkiStore().Leaf("apiserver-extension-client").KeyBase64(),
 	)
 
 	return c.kubeConfigRef(name).Write([]byte(kc))
 }
 
-func (c *ControlPlane) makeAPIKubeconfig(name string, p *pkiRef) error {
+func (c *ControlPlane) makeAPIKubeconfig(name string, l *pki.Leaf) error {
+	ca, err := c.pkiStore().CA(pki.APIServer)
+	if err != nil {
+		return err
+	}
 	kc := fmt.Sprintf(`
 apiVersion: v1
 kind: Config
@@ -460,14 +505,18 @@ users:
 `,
 		c.apiserverURL(),
 		c.externalHostname(),
-		c.caRef(APIServer).CertBase64String(),
-		p.CertBase64String(),
-		p.KeyBase64String(),
+		ca.CertBase64(),
+		l.CertBase64(),
+		l.KeyBase64(),
 	)
 	return c.kubeConfigRef(name).Write([]byte(kc))
 }
 
-func (c *ControlPlane) makeNodeKubeconfig(nodeName string, p *pkiRef) error {
+func (c *ControlPlane) makeNodeKubeconfig(nodeName string, l *pki.Leaf) error {
+	ca, err := c.pkiStore().CA(pki.APIServer)
+	if err != nil {
+		return err
+	}
 	kc := fmt.Sprintf(`
 apiVersion: v1
 kind: Config
@@ -489,9 +538,9 @@ users:
     client-key-data: %q
 `,
 		(&url.URL{Scheme: "https", Host: c.hostname("apiserver")}).String(),
-		c.caRef(APIServer).CertBase64String(),
-		p.CertBase64String(),
-		p.KeyBase64String(),
+		ca.CertBase64(),
+		l.CertBase64(),
+		l.KeyBase64(),
 	)
 	return c.kubeConfigRef(nodeName).Write([]byte(kc))
 }
@@ -606,7 +655,11 @@ rules:
 
 func (c *ControlPlane) makeAPIService(g ...*kapi.Group) error {
 	namespace, name := "kube-system", "api-runkube-internal"
-	caBundle, err := os.ReadFile(c.caRef(WebhookServer).certPath)
+	ca, err := c.pkiStore().CA(pki.WebhookServer)
+	if err != nil {
+		return err
+	}
+	caBundle, err := ca.CertPEM()
 	if err != nil {
 		return err
 	}

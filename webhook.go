@@ -2,13 +2,14 @@ package runkube
 
 import (
 	"context"
+	"crypto/tls"
 	"log/slog"
 	"net/url"
-	"os"
 	"slices"
 
 	"github.com/hoskeri/runkube/pkg/frontend"
 	"github.com/hoskeri/runkube/pkg/kapi"
+	"github.com/hoskeri/runkube/pkg/pki"
 	"github.com/hoskeri/runkube/pkg/webhook"
 	admv1 "k8s.io/api/admission/v1"
 	radmv1 "k8s.io/api/admissionregistration/v1"
@@ -86,7 +87,11 @@ func builtinAdmitter(mutating bool) webhook.Admitter {
 }
 
 func (c *ControlPlane) makeAdmissionWebhook() error {
-	caBundle, err := os.ReadFile(c.caRef(WebhookServer).certPath)
+	ca, err := c.pkiStore().CA(pki.WebhookServer)
+	if err != nil {
+		return err
+	}
+	caBundle, err := ca.CertPEM()
 	if err != nil {
 		return err
 	}
@@ -192,7 +197,13 @@ func (c *ControlPlane) RunWebhook(ctx context.Context) error {
 			Handler:    builtinAdmitter(true),
 		},
 	} {
-		o.ServerCert = c.certRef("webhook-server").TLSCertificate()
+		cert, err := c.pkiStore().Leaf("webhook-server").TLSCertificate()
+		if err != nil {
+			return err
+		}
+		o.ServerCert = func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+			return &cert, nil
+		}
 		if err := ff.Register(o); err != nil {
 			return err
 		}
