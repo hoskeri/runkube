@@ -7,29 +7,21 @@ import (
 
 var defaultAPIGroups = []*kapi.Group{
 	{
-		APIVersion: schema.GroupVersion{Group: "api.runkube.internal", Version: "v1"},
-		Resources: []kapi.Resource{
-			&kapi.ResourceSpec{
-				GroupVersionKind: schema.GroupVersionKind{
-					Group:   "api.runkube.internal",
-					Version: "v1",
-					Kind:    "Bucket",
-				},
+		GroupVersion: schema.GroupVersion{Group: "api.runkube.internal", Version: "v1"},
+		Resources: []*kapi.Resource{
+			{
+				GVK:      schema.GroupVersionKind{Group: "api.runkube.internal", Version: "v1", Kind: "Bucket"},
 				Resource: "buckets",
 			},
 		},
 	},
 	{
-		APIVersion: schema.GroupVersion{Group: "example-b.runkube.internal", Version: "v1"},
-		Resources: []kapi.Resource{
-			&kapi.ResourceSpec{
-				GroupVersionKind: schema.GroupVersionKind{
-					Group:   "example-b.runkube.internal",
-					Version: "v1",
-					Kind:    "ExampleB",
-				},
+		GroupVersion: schema.GroupVersion{Group: "example-b.runkube.internal", Version: "v1"},
+		Resources: []*kapi.Resource{
+			{
+				GVK:      schema.GroupVersionKind{Group: "example-b.runkube.internal", Version: "v1", Kind: "ExampleB"},
 				Namespaced: true,
-				Resource:   "examplesb",
+				Resource: "examplesb",
 			},
 		},
 	},
