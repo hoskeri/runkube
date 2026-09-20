@@ -1,12 +1,8 @@
 GO      := go
 GOFLAGS := -tags netgo,usergo -v -buildvcs
-
 DESTDIR := _output/bin
-
 TOOLS_BASE := requestor quotable isolated runkube
 TOOLS    := $(addprefix $(DESTDIR)/,$(TOOLS_BASE))
-
-all: $(TOOLS)
 
 all: $(TOOLS)
 

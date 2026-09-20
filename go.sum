@@ -77,6 +77,8 @@ github.com/hoskeri/procman v0.0.0-20260531012441-db3a41a68c8f h1:Lt1xisyGXrPo3aw
 github.com/hoskeri/procman v0.0.0-20260531012441-db3a41a68c8f/go.mod h1:GufQoa1Ehd+l4mep5WDDRCextMfIfCroGLiOZDKtHrM=
 github.com/hoskeri/procman v0.0.0-20260814223320-3e104afc466e h1:W8az59n9cbqAThhZwT25hex/wGCdMktvq3fL2znH+C0=
 github.com/hoskeri/procman v0.0.0-20260814223320-3e104afc466e/go.mod h1:GufQoa1Ehd+l4mep5WDDRCextMfIfCroGLiOZDKtHrM=
+github.com/hoskeri/procman v0.0.0-20260920193915-f6725f29a531 h1:yHD27Rcjc99mF+UvLlQtwvjeDSc4hUBohaB1khxY6PM=
+github.com/hoskeri/procman v0.0.0-20260920193915-f6725f29a531/go.mod h1:UPD787kQC9DkFXCHgT2zKBoQepLcMKoi76IIVhsjf8c=
 github.com/inconshreveable/mousetrap v1.1.0 h1:wN+x4NVGpMsO7ErUn/mUI3vEoE6Jt13X2s0bqwp9tc8=
 github.com/inconshreveable/mousetrap v1.1.0/go.mod h1:vpF70FUmC8bwa3OWnCshd2FqLfsEA9PFc4w1p2J65bw=
 github.com/json-iterator/go v1.1.12 h1:PV8peI4a0ysnczrg+LtxykD8LfKY9ML6u2jnxaEnrnM=
