@@ -3,11 +3,12 @@ module github.com/hoskeri/runkube
 go 1.27.1
 
 require (
+	github.com/fxamacker/cbor/v2 v2.9.0
 	github.com/go-jose/go-jose/v4 v4.1.4
-	github.com/hanwen/go-fuse/v2 v2.10.1
 	github.com/hoskeri/procman v0.0.0-20260920193915-f6725f29a531
 	github.com/spf13/pflag v1.0.10
 	github.com/vishvananda/netlink v1.3.1
+	go.etcd.io/bbolt v1.5.0
 	go.yaml.in/yaml/v3 v3.0.4
 	golang.org/x/sync v0.21.0
 	golang.org/x/sys v0.46.0
@@ -27,7 +28,6 @@ require (
 	github.com/blang/semver/v4 v4.0.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/emicklei/go-restful/v3 v3.13.0 // indirect
-	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
 	github.com/go-errors/errors v1.5.1 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-openapi/jsonpointer v0.22.4 // indirect
