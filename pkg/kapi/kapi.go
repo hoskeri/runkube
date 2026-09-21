@@ -1,17 +1,3 @@
-// Package kapi provides a lightweight framework for building Kubernetes
-// extension API servers without the full k8s.io/apiserver dependency stack.
-//
-// It supplies:
-//   - Standard Kubernetes API URL routing (/apis/{group}/{version}/...)
-//   - Per-resource verb dispatch (list, get, create, update, delete, patch, watch)
-//   - Sub-resources with independent handlers (status, scale, proxy, etc.)
-//   - Discovery and APIService object generation
-//   - Minimal OpenAPI v3 by default, enriched via per-resource hooks
-//   - A RawHandler catch-all for verbs or paths not covered by specific handlers
-//
-// kapi does NOT provide persistence, admission webhooks, RBAC, or rich
-// OpenAPI spec generation. Handlers are responsible for their own storage
-// and business logic.
 package kapi
 
 import (
@@ -22,39 +8,33 @@ import (
 	"net/http"
 	"path"
 	"slices"
+	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 // ── Service ────────────────────────────────────────────────
 
-// Service is an http.Handler that serves a set of API groups.
 type Service struct {
 	mux       *http.ServeMux
 	apiGroups []*Group
 }
 
-// NewAPI constructs a Service from the provided groups.
 func NewAPI(groups ...*Group) *Service {
 	s := &Service{mux: http.NewServeMux(), apiGroups: groups}
-	s.install()
+	s.installGlobal()
 	for _, g := range groups {
 		g.install(s.mux)
 	}
 	return s
 }
 
-// ServeHTTP implements http.Handler by delegating to the internal mux.
 func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
 }
 
-// APIServices yields APIService objects (apiregistration.k8s.io/v1)
-// for all registered groups, suitable for registering with the main
-// Kubernetes API server.
 func (s *Service) APIServices(caBundle []byte, namespace, name string) iter.Seq[runtime.Object] {
 	return func(yield func(runtime.Object) bool) {
 		for _, g := range s.apiGroups {
@@ -65,8 +45,7 @@ func (s *Service) APIServices(caBundle []byte, namespace, name string) iter.Seq[
 	}
 }
 
-// install registers the global discovery endpoints and catch-all.
-func (s *Service) install() {
+func (s *Service) installGlobal() {
 	s.mux.HandleFunc("/{a...}", func(w http.ResponseWriter, r *http.Request) {
 		slog.Debug("kapi: no matching resource", "method", r.Method, "path", r.URL.Path)
 		writeStatus(w, http.StatusNotFound, fmt.Errorf("%s not found", r.URL.Path))
@@ -76,17 +55,14 @@ func (s *Service) install() {
 		encode(w, &metav1.APIGroupList{})
 	})
 
-	// OpenAPI v3 root — lists per-group OpenAPI document URLs.
+	// OpenAPI v3 root — lists per-group document URLs.
 	type oaEntry struct {
 		ServerRelativeURL string `json:"serverRelativeURL"`
 	}
-
 	ps := make(map[string]oaEntry)
 	for _, g := range s.apiGroups {
 		p := fmt.Sprintf("apis/%s/%s", g.GroupVersion.Group, g.GroupVersion.Version)
-		ps[p] = oaEntry{
-			ServerRelativeURL: path.Join("/openapi/v3", p),
-		}
+		ps[p] = oaEntry{ServerRelativeURL: path.Join("/openapi/v3", p)}
 	}
 
 	s.mux.HandleFunc("GET /openapi/{version}", func(w http.ResponseWriter, r *http.Request) {
@@ -96,21 +72,11 @@ func (s *Service) install() {
 
 // ── Group ──────────────────────────────────────────────────
 
-// Group collects resources under one group-version.
-type Group struct {
-	GroupVersion schema.GroupVersion
-	Resources    []*Resource
-
-	// OpenAPI, when non-nil, injects additional top-level entries
-	// into the group's OpenAPI v3 document (paths, components, etc.).
-	// The returned map is shallow-merged into the generated doc.
-	OpenAPI func(gv schema.GroupVersion) map[string]any
-}
-
-// install registers group-level discovery and per-resource patterns.
 func (g *Group) install(m *http.ServeMux) {
-	// Group discovery — list resources under this group-version.
-	m.HandleFunc("GET "+g.url("/apis/{group}/{version}"), func(w http.ResponseWriter, r *http.Request) {
+	base := path.Join("/apis", g.GroupVersion.Group, g.GroupVersion.Version)
+
+	// Group discovery.
+	m.HandleFunc("GET "+base, func(w http.ResponseWriter, r *http.Request) {
 		encode(w, &metav1.APIResourceList{
 			GroupVersion: g.GroupVersion.String(),
 			APIResources: slices.Collect(g.apiDiscovery()),
@@ -118,10 +84,10 @@ func (g *Group) install(m *http.ServeMux) {
 	})
 
 	// Per-group OpenAPI v3 document.
-	m.HandleFunc("GET "+g.url("/openapi/v3/apis/{group}/{version}"), func(w http.ResponseWriter, r *http.Request) {
-		doc := g.openAPIv3()
-		encode(w, doc)
-	})
+	m.HandleFunc("GET "+path.Join("/openapi/v3/apis", g.GroupVersion.Group, g.GroupVersion.Version),
+		func(w http.ResponseWriter, r *http.Request) {
+			encode(w, g.openAPIv3())
+		})
 
 	// Per-resource patterns.
 	for _, res := range g.Resources {
@@ -129,7 +95,6 @@ func (g *Group) install(m *http.ServeMux) {
 	}
 }
 
-// apiDiscovery yields APIResource descriptors for all resources.
 func (g *Group) apiDiscovery() iter.Seq[metav1.APIResource] {
 	return func(yield func(metav1.APIResource) bool) {
 		for _, r := range g.Resources {
@@ -140,10 +105,9 @@ func (g *Group) apiDiscovery() iter.Seq[metav1.APIResource] {
 	}
 }
 
-// apiService builds an APIService unstructured object.
 func (g *Group) apiService(caBundle []byte, namespace, name string) runtime.Object {
 	spec := map[string]any{
-		"caBundle":             encodeBase64(caBundle),
+		"caBundle":             b64(caBundle),
 		"group":                g.GroupVersion.Group,
 		"version":              g.GroupVersion.Version,
 		"groupPriorityMinimum": int64(1000),
@@ -162,12 +126,88 @@ func (g *Group) apiService(caBundle []byte, namespace, name string) runtime.Obje
 	return u
 }
 
-// url substitutes {group}/{version} placeholders with the group's values.
-func (g *Group) url(tmpl string) string {
-	return expandPath(tmpl, g.GroupVersion.Group, g.GroupVersion.Version, "")
+// ── OpenAPI v3 ─────────────────────────────────────────────
+
+func (g *Group) openAPIv3() map[string]any {
+	paths := make(map[string]any)
+	schemas := make(map[string]any)
+
+	for _, r := range g.Resources {
+		d := r.descriptor()
+		basePath := path.Join("/apis", g.GroupVersion.Group, g.GroupVersion.Version, d.Name)
+
+		op := map[string]any{
+			"get": map[string]any{
+				"x-kubernetes-group-version-kind": map[string]any{
+					"group":   d.Group,
+					"version": d.Version,
+					"kind":    d.Kind,
+				},
+			},
+		}
+		if r.OpenAPIOperation != nil {
+			if enriched := r.OpenAPIOperation("list"); enriched != nil {
+				mergeMap(op["get"].(map[string]any), enriched)
+			}
+		}
+		paths[basePath] = op
+
+		schemaKey := strings.Join([]string{d.Group, d.Version, d.Kind}, ".")
+		schema := map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"apiVersion": map[string]any{"type": "string"},
+				"kind":       map[string]any{"type": "string"},
+			},
+			"x-kubernetes-group-version-kind": []any{
+				map[string]any{
+					"group":   d.Group,
+					"version": d.Version,
+					"kind":    d.Kind,
+				},
+			},
+		}
+		if r.OpenAPISchema != nil {
+			if enriched := r.OpenAPISchema(); enriched != nil {
+				mergeMap(schema, enriched)
+			}
+		}
+		schemas[schemaKey] = schema
+	}
+
+	doc := map[string]any{
+		"paths":      paths,
+		"components": map[string]any{"schemas": schemas},
+	}
+	if g.OpenAPI != nil {
+		if injected := g.OpenAPI(g.GroupVersion); injected != nil {
+			mergeMap(doc, injected)
+		}
+	}
+	return doc
 }
 
-// ── Response writing helpers ───────────────────────────────
+// ── descriptor ─────────────────────────────────────────────
+
+var defaultVerbs = metav1.Verbs{"get", "list", "watch", "create", "update", "patch", "delete", "proxy"}
+
+func (r *Resource) descriptor() metav1.APIResource {
+	v := defaultVerbs
+	if len(r.Verbs) > 0 {
+		v = r.Verbs
+	}
+	return metav1.APIResource{
+		Name:         r.Resource,
+		Group:        r.GVK.Group,
+		Version:      r.GVK.Version,
+		SingularName: r.GVK.Kind,
+		Kind:         r.GVK.Kind,
+		Namespaced:   r.Namespaced,
+		Verbs:        v,
+	}
+}
+
+// ── Response helpers ───────────────────────────────────────
 
 func encode(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
@@ -181,11 +221,19 @@ func writeStatus(w http.ResponseWriter, code int, err error) {
 	}
 	w.WriteHeader(code)
 	encode(w, &metav1.Status{
-		Status: metav1.StatusFailure,
-		Code:   int32(code),
-		Reason: reasonForCode(code),
+		Status:  metav1.StatusFailure,
+		Code:    int32(code),
+		Reason:  reasonForCode(code),
 		Message: msg,
 	})
+}
+
+func writeError(w http.ResponseWriter, err error) {
+	if se, ok := err.(HTTPStatusError); ok {
+		writeStatus(w, int(se.HTTPStatus()), err)
+		return
+	}
+	writeStatus(w, http.StatusInternalServerError, err)
 }
 
 func reasonForCode(code int) metav1.StatusReason {
@@ -219,13 +267,16 @@ func reasonForCode(code int) metav1.StatusReason {
 	}
 }
 
-// encodeBase64 returns the standard-base64 encoding of data.
-func encodeBase64(data []byte) string {
-	const enc = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+func errMethodNotAllowed(verb string) error {
+	return &statusError{code: http.StatusMethodNotAllowed, message: fmt.Sprintf("%s is not supported", verb)}
+}
+
+// b64 returns the standard-base64 encoding of data.
+func b64(data []byte) string {
 	if len(data) == 0 {
 		return ""
 	}
-	// Simple inline base64 — avoids importing encoding/base64 for this one call.
+	const enc = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 	n := (len(data) + 2) / 3 * 4
 	buf := make([]byte, n)
 	j := 0
@@ -253,4 +304,10 @@ func encodeBase64(data []byte) string {
 		j += 4
 	}
 	return string(buf)
+}
+
+func mergeMap(dst, src map[string]any) {
+	for k, v := range src {
+		dst[k] = v
+	}
 }
