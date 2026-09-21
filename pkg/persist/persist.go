@@ -12,6 +12,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/validation/path"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer/cbor"
 	"k8s.io/apimachinery/pkg/util/uuid"
@@ -129,6 +131,12 @@ type Matcher struct {
 	rm        *meta.RESTMapping
 	namespace string
 	name      string
+
+	labelSel labels.Selector
+	fieldSel fields.Selector
+	// fieldExtractor extracts a fields.Set from a runtime.Object for
+	// field selector matching. If nil, DefaultFieldExtractor is used.
+	fieldExtractor func(runtime.Object) fields.Set
 }
 
 func (m *Matcher) Matches(r *Reference) int {
@@ -176,6 +184,29 @@ func (m *Matcher) Matches(r *Reference) int {
 	return 0
 }
 
+// MatchesObject returns true if the object matches the matcher's
+// label and field selectors. It does not check key-level fields
+// (GVR, namespace, name) — those are checked by Matches.
+func (m *Matcher) MatchesObject(obj runtime.Object) bool {
+	mo, err := meta.Accessor(obj)
+	if err != nil {
+		return false
+	}
+	if m.labelSel != nil && !m.labelSel.Matches(labels.Set(mo.GetLabels())) {
+		return false
+	}
+	if m.fieldSel != nil {
+		fe := m.fieldExtractor
+		if fe == nil {
+			fe = DefaultFieldExtractor
+		}
+		if !m.fieldSel.Matches(fe(obj)) {
+			return false
+		}
+	}
+	return true
+}
+
 type MatchOption func(m *Matcher)
 
 func WithName(namespace string, name string) MatchOption {
@@ -195,6 +226,52 @@ func WithRealm(realm string) MatchOption {
 	return func(m *Matcher) {
 		m.realm = realm
 	}
+}
+
+// WithLabelSelector adds label-based filtering. The selector is evaluated
+// against each object's labels during List (not during key-level Query).
+// If nil, no label filtering is applied.
+func WithLabelSelector(sel labels.Selector) MatchOption {
+	return func(m *Matcher) {
+		m.labelSel = sel
+	}
+}
+
+// WithFieldSelector adds field-based filtering. The selector is evaluated
+// against each object's fields during List. If nil, no field filtering.
+func WithFieldSelector(sel fields.Selector) MatchOption {
+	return func(m *Matcher) {
+		m.fieldSel = sel
+	}
+}
+
+// WithFieldExtractor overrides the default field extractor used for
+// field selector matching. The default extracts metadata.name,
+// metadata.namespace, and metadata.uid.
+func WithFieldExtractor(fe func(runtime.Object) fields.Set) MatchOption {
+	return func(m *Matcher) {
+		m.fieldExtractor = fe
+	}
+}
+
+// DefaultFieldExtractor extracts a fields.Set from a runtime.Object
+// containing metadata.name, metadata.namespace, and metadata.uid.
+func DefaultFieldExtractor(obj runtime.Object) fields.Set {
+	mo, err := meta.Accessor(obj)
+	if err != nil {
+		return fields.Set{}
+	}
+	fs := fields.Set{}
+	if name := mo.GetName(); name != "" {
+		fs["metadata.name"] = name
+	}
+	if ns := mo.GetNamespace(); ns != "" {
+		fs["metadata.namespace"] = ns
+	}
+	if uid := mo.GetUID(); uid != "" {
+		fs["metadata.uid"] = string(uid)
+	}
+	return fs
 }
 
 func NewMatcher(rm *meta.RESTMapping, opts ...MatchOption) (*Matcher, error) {
@@ -517,4 +594,28 @@ func (p *DB) Query(m *Matcher) ([]*Reference, error) {
 		return nil
 	})
 	return refs, err
+}
+
+// List returns all objects matching the matcher's key-level filters
+// (GVR, namespace, name) AND object-level label/field selectors.
+//
+// It first queries for matching references, then fetches and filters
+// each object. Label and field selectors are applied after deserialization,
+// so they add O(m) deserialization cost where m = matching references.
+func (p *DB) List(m *Matcher) ([]runtime.Object, error) {
+	refs, err := p.Query(m)
+	if err != nil {
+		return nil, err
+	}
+	objs := make([]runtime.Object, 0, len(refs))
+	for _, ref := range refs {
+		obj, err := p.Get(ref)
+		if err != nil {
+			continue
+		}
+		if m.MatchesObject(obj) {
+			objs = append(objs, obj)
+		}
+	}
+	return objs, nil
 }

@@ -12,7 +12,10 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/runtime/serializer/cbor"
 	"k8s.io/apimachinery/pkg/util/rand"
@@ -562,4 +565,202 @@ func TestWatchFiltering(t *testing.T) {
 	default:
 		// OK — no extra events.
 	}
+}
+
+// ── Label/field selector tests ──────────────────────────────
+
+func makeLabelledObject(m *meta.RESTMapping, name, ns string, labelsIn map[string]string) runtime.Object {
+	obj := makeObject(m)
+	mo, err := meta.Accessor(obj)
+	if err != nil {
+		panic(err)
+	}
+	mo.SetName(name)
+	mo.SetLabels(labelsIn)
+	if ns != "" {
+		mo.SetNamespace(ns)
+	}
+	return obj
+}
+
+func TestListLabelSelector(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	dbp := path.Join(t.TempDir(), "test.db")
+	db, err := Open(dbp, testScheme())
+	fatal(t, err)
+	defer db.b.Close()
+
+	// Create three objects with different labels.
+	for _, tc := range []struct {
+		name   string
+		labels map[string]string
+	}{
+		{"a", map[string]string{"env": "prod", "tier": "frontend"}},
+		{"b", map[string]string{"env": "prod", "tier": "backend"}},
+		{"c", map[string]string{"env": "staging", "tier": "frontend"}},
+	} {
+		obj := makeLabelledObject(sticksMapping, tc.name, "ns1", tc.labels)
+		fatal(t, db.Create(sticksMapping, obj))
+	}
+
+	// Select env=prod.
+	sel := labels.Set{"env": "prod"}.AsSelector()
+	m, err := NewMatcher(sticksMapping, WithNamespace("ns1"), WithLabelSelector(sel))
+	fatal(t, err)
+
+	objs, err := db.List(m)
+	fatal(t, err)
+	if len(objs) != 2 {
+		t.Fatalf("expected 2 objects for env=prod, got %d", len(objs))
+	}
+	names := make(map[string]bool)
+	for _, o := range objs {
+		mo, err := meta.Accessor(o)
+		fatal(t, err)
+		names[mo.GetName()] = true
+	}
+	if !names["a"] || !names["b"] {
+		t.Fatal("expected objects a and b")
+	}
+	_ = ctx
+}
+
+func TestListLabelRequirement(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	dbp := path.Join(t.TempDir(), "test.db")
+	db, err := Open(dbp, testScheme())
+	fatal(t, err)
+	defer db.b.Close()
+
+	for _, tc := range []struct {
+		name   string
+		labels map[string]string
+	}{
+		{"a", map[string]string{"env": "prod", "region": "us-east"}},
+		{"b", map[string]string{"env": "prod"}},
+		{"c", map[string]string{"env": "staging", "region": "us-east"}},
+	} {
+		obj := makeLabelledObject(sticksMapping, tc.name, "ns1", tc.labels)
+		fatal(t, db.Create(sticksMapping, obj))
+	}
+
+	// Select env=prod,region=us-east (two labels ANDed).
+	req, err := labels.NewRequirement("env", selection.Equals, []string{"prod"})
+	fatal(t, err)
+	req2, err := labels.NewRequirement("region", selection.Equals, []string{"us-east"})
+	fatal(t, err)
+	sel := labels.NewSelector().Add(*req, *req2)
+
+	m, err := NewMatcher(sticksMapping, WithNamespace("ns1"), WithLabelSelector(sel))
+	fatal(t, err)
+
+	objs, err := db.List(m)
+	fatal(t, err)
+	if len(objs) != 1 {
+		t.Fatalf("expected 1 object, got %d", len(objs))
+	}
+	mo, err := meta.Accessor(objs[0])
+	fatal(t, err)
+	if mo.GetName() != "a" {
+		t.Fatalf("expected object a, got %s", mo.GetName())
+	}
+	_ = ctx
+}
+
+func TestListFieldSelector(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	dbp := path.Join(t.TempDir(), "test.db")
+	db, err := Open(dbp, testScheme())
+	fatal(t, err)
+	defer db.b.Close()
+
+	// Create two objects with specific names.
+	for _, name := range []string{"alpha", "beta"} {
+		obj := makeLabelledObject(sticksMapping, name, "ns1", nil)
+		fatal(t, db.Create(sticksMapping, obj))
+	}
+
+	// Field-select metadata.name=alpha.
+	sel := fields.Set{"metadata.name": "alpha"}.AsSelector()
+	m, err := NewMatcher(sticksMapping, WithNamespace("ns1"), WithFieldSelector(sel))
+	fatal(t, err)
+
+	objs, err := db.List(m)
+	fatal(t, err)
+	if len(objs) != 1 {
+		t.Fatalf("expected 1 object, got %d", len(objs))
+	}
+	mo, err := meta.Accessor(objs[0])
+	fatal(t, err)
+	if mo.GetName() != "alpha" {
+		t.Fatalf("expected alpha, got %s", mo.GetName())
+	}
+	_ = ctx
+}
+
+func TestListLabelAndFieldSelector(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	dbp := path.Join(t.TempDir(), "test.db")
+	db, err := Open(dbp, testScheme())
+	fatal(t, err)
+	defer db.b.Close()
+
+	for _, tc := range []struct {
+		name   string
+		labels map[string]string
+	}{
+		{"app-a", map[string]string{"app": "web", "env": "prod"}},
+		{"app-b", map[string]string{"app": "web", "env": "staging"}},
+		{"db-a", map[string]string{"app": "db", "env": "prod"}},
+	} {
+		obj := makeLabelledObject(sticksMapping, tc.name, "ns1", tc.labels)
+		fatal(t, db.Create(sticksMapping, obj))
+	}
+
+	// Label: app=web AND field: metadata.name=app-a.
+	lsel := labels.Set{"app": "web"}.AsSelector()
+	fsel := fields.Set{"metadata.name": "app-a"}.AsSelector()
+	m, err := NewMatcher(sticksMapping, WithNamespace("ns1"),
+		WithLabelSelector(lsel), WithFieldSelector(fsel))
+	fatal(t, err)
+
+	objs, err := db.List(m)
+	fatal(t, err)
+	if len(objs) != 1 {
+		t.Fatalf("expected 1 object, got %d", len(objs))
+	}
+	mo, err := meta.Accessor(objs[0])
+	fatal(t, err)
+	if mo.GetName() != "app-a" {
+		t.Fatalf("expected app-a, got %s", mo.GetName())
+	}
+	_ = ctx
+}
+
+func TestListEmpty(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	dbp := path.Join(t.TempDir(), "test.db")
+	db, err := Open(dbp, testScheme())
+	fatal(t, err)
+	defer db.b.Close()
+
+	obj := makeLabelledObject(sticksMapping, "x", "ns1", map[string]string{"env": "prod"})
+	fatal(t, db.Create(sticksMapping, obj))
+
+	// Label selector that matches nothing.
+	sel := labels.Set{"env": "nonexistent"}.AsSelector()
+	m, err := NewMatcher(sticksMapping, WithNamespace("ns1"), WithLabelSelector(sel))
+	fatal(t, err)
+
+	objs, err := db.List(m)
+	fatal(t, err)
+	if len(objs) != 0 {
+		t.Fatalf("expected 0 objects, got %d", len(objs))
+	}
+	_ = ctx
 }
