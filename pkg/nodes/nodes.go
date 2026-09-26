@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net"
 	"os"
 	"path"
 	"path/filepath"
@@ -17,7 +16,7 @@ import (
 	"github.com/hoskeri/procman/pkg/process"
 	"github.com/hoskeri/procman/pkg/termhandler"
 	"github.com/hoskeri/runkube/pkg/cri"
-	"github.com/hoskeri/runkube/pkg/grpcmiddleware"
+	"github.com/hoskeri/runkube/pkg/grpcserver"
 	"github.com/hoskeri/runkube/pkg/randid"
 	"github.com/hoskeri/runkube/pkg/ref"
 	"github.com/hoskeri/runkube/pkg/sandbox"
@@ -307,31 +306,20 @@ func (c *Node) RunCRIServer(ctx context.Context) error {
 		return err
 	}
 
-	s := grpc.NewServer(grpc.ChainUnaryInterceptor(grpcmiddleware.Recover, grpcmiddleware.Logging))
-	reflection.Register(s)
-
-	if err := cri.Register(s, b); err != nil {
+	endpoint := c.ContainerRuntimeEndpoint()
+	if err := os.MkdirAll(path.Dir(endpoint), 0700); err != nil {
 		return err
 	}
 
-	slog.Info("RunServer", "sock", c.ContainerRuntimeEndpoint())
-	if err := os.MkdirAll(path.Dir(c.ContainerRuntimeEndpoint()), 0700); err != nil {
-		return err
-	}
+	s := grpcserver.New(grpcserver.Config{
+		Name:    "cri",
+		Network: "unix",
+		Address: endpoint,
+		Register: func(r *grpc.Server) error {
+			reflection.Register(r)
+			return cri.Register(r, b)
+		},
+	})
 
-	l, err := net.Listen("unix", c.ContainerRuntimeEndpoint())
-	if err != nil {
-		return err
-	}
-
-	defer l.Close()
-	go func() {
-		_, cancel := context.WithCancelCause(ctx)
-		cancel(s.Serve(l))
-	}()
-
-	<-ctx.Done()
-	s.Stop()
-
-	return ctx.Err()
+	return s.ListenAndServe(ctx)
 }

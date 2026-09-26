@@ -11,12 +11,12 @@ import (
 	"encoding/json"
 	"errors"
 	log "log/slog"
-	"net"
 	"os"
 	"path"
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
+	"github.com/hoskeri/runkube/pkg/grpcserver"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/reflection"
@@ -193,24 +193,25 @@ var _ kmsv2.KeyManagementServiceServer = &kms{}
 
 // RunKMSPlugin starts the KMS plugin gRPC server.
 func (c *ControlPlane) RunKMSPlugin(ctx context.Context) error {
-	p := c.unixSocketURL("kms")
-	l, err := net.Listen("unix", p.Opaque)
-	if err != nil {
-		return err
-	}
-
-	s := grpc.NewServer(grpc.WaitForHandlers(true))
-
 	ksr := c.keySetRef("encryption")
 	if err := ksr.Read(); err != nil {
 		return err
 	}
 
-	kmsv2.RegisterKeyManagementServiceServer(s, &kms{
-		keySet: ksr,
+	s := grpcserver.New(grpcserver.Config{
+		Name:    "kms",
+		Network: "unix",
+		Address: c.unixSocketURL("kms").Opaque,
+		Options: []grpc.ServerOption{grpc.WaitForHandlers(true)},
+		Register: func(r *grpc.Server) error {
+			kmsv2.RegisterKeyManagementServiceServer(r, &kms{
+				keySet: ksr,
+			})
+			return nil
+		},
 	})
 
-	return s.Serve(l)
+	return s.ListenAndServe(ctx)
 }
 
 type jwtsigner struct {
@@ -323,17 +324,17 @@ func (c *ControlPlane) RunJWTSigner(ctx context.Context) error {
 	if err := ksr.Read(); err != nil {
 		return err
 	}
-	signer := &jwtsigner{keySet: ksr}
 
-	s := grpc.NewServer()
-	externaljwt.RegisterExternalJWTSignerServer(s, signer)
-	reflection.Register(s)
+	s := grpcserver.New(grpcserver.Config{
+		Name:    "jwtsigner",
+		Network: "unix",
+		Address: c.unixSocketURL("jwtsigner").Opaque,
+		Register: func(r *grpc.Server) error {
+			externaljwt.RegisterExternalJWTSignerServer(r, &jwtsigner{keySet: ksr})
+			reflection.Register(r)
+			return nil
+		},
+	})
 
-	p := c.unixSocketURL("jwtsigner")
-	l, err := net.Listen("unix", p.Opaque)
-	if err != nil {
-		return err
-	}
-
-	return s.Serve(l)
+	return s.ListenAndServe(ctx)
 }
