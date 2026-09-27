@@ -1,7 +1,5 @@
 package filter
 
-import ()
-
 // FilterBuilder constructs BPF programs programmatically
 type FilterBuilder struct {
 	registry *Registry

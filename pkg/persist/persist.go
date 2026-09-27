@@ -357,8 +357,8 @@ func Open(fp string, s *runtime.Scheme) (*DB, error) {
 	}
 
 	d := &DB{
-		b:        b,
-		scheme:   s,
+		b:          b,
+		scheme:     s,
 		serializer: cbor.NewSerializer(s, s),
 	}
 

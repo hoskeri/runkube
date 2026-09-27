@@ -47,7 +47,7 @@ func TestEnvEntryRoundtrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	prefix := NodeEnvVar+"="
+	prefix := NodeEnvVar + "="
 	if !strings.HasPrefix(entry, prefix) {
 		t.Errorf("EnvEntry %q does not start with %q", entry, prefix)
 	}

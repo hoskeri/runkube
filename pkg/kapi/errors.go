@@ -18,8 +18,8 @@ type statusError struct {
 	message string
 }
 
-func (e *statusError) Error() string       { return e.message }
-func (e *statusError) HTTPStatus() int32   { return e.code }
+func (e *statusError) Error() string     { return e.message }
+func (e *statusError) HTTPStatus() int32 { return e.code }
 
 // Convenience constructors. Each returns an error that implements
 // HTTPStatusError with the standard Kubernetes semantic code.

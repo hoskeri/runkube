@@ -46,8 +46,8 @@ func TestClusterScoped_GetCreateDelete(t *testing.T) {
 	store := newWidgetStore()
 
 	res := &Resource{
-		GVK:       gvk("example.io", "v1", "Gadget"),
-		Resource:  "gadgets",
+		GVK:        gvk("example.io", "v1", "Gadget"),
+		Resource:   "gadgets",
 		Namespaced: false,
 		Getter: GetFunc(func(ctx context.Context, name string) (*unstructured.Unstructured, error) {
 			w, ok := store.items[name]
@@ -123,8 +123,8 @@ func TestNamespaced_List(t *testing.T) {
 	store.items["ns1/b"] = &widget{Name: "b", Namespace: "ns1"}
 
 	res := &Resource{
-		GVK:       gvk("example.io", "v1", "Widget"),
-		Resource:  "widgets",
+		GVK:        gvk("example.io", "v1", "Widget"),
+		Resource:   "widgets",
 		Namespaced: true,
 		Lister: &ListWatch{
 			ListFunc: func(ctx context.Context, opts metav1.ListOptions) (*unstructured.UnstructuredList, error) {
@@ -167,8 +167,8 @@ func TestNamespaced_List(t *testing.T) {
 
 func TestPatchMergePatch(t *testing.T) {
 	res := &Resource{
-		GVK:       gvk("example.io", "v1", "Widget"),
-		Resource:  "widgets",
+		GVK:        gvk("example.io", "v1", "Widget"),
+		Resource:   "widgets",
 		Namespaced: true,
 		Patcher: PatchFunc(func(ctx context.Context, name string, pt types.PatchType, data []byte) (*unstructured.Unstructured, error) {
 			if pt != types.MergePatchType {
@@ -200,8 +200,8 @@ func TestPatchMergePatch(t *testing.T) {
 func TestUpdate(t *testing.T) {
 	var updatedName string
 	res := &Resource{
-		GVK:       gvk("example.io", "v1", "Widget"),
-		Resource:  "widgets",
+		GVK:        gvk("example.io", "v1", "Widget"),
+		Resource:   "widgets",
 		Namespaced: true,
 		Updater: UpdateFunc(func(ctx context.Context, name string, obj *unstructured.Unstructured) (*unstructured.Unstructured, error) {
 			updatedName = name
@@ -232,8 +232,8 @@ func TestUpdate(t *testing.T) {
 func TestDeleteCollection(t *testing.T) {
 	var deleted bool
 	res := &Resource{
-		GVK:       gvk("example.io", "v1", "Widget"),
-		Resource:  "widgets",
+		GVK:        gvk("example.io", "v1", "Widget"),
+		Resource:   "widgets",
 		Namespaced: true,
 		CollectionDeleter: DeleteCollectionFunc(func(ctx context.Context, opts metav1.ListOptions) error {
 			deleted = true
@@ -259,8 +259,8 @@ func TestDeleteCollection(t *testing.T) {
 
 func TestUnimplementedOperation_405(t *testing.T) {
 	res := &Resource{
-		GVK:       gvk("example.io", "v1", "Widget"),
-		Resource:  "widgets",
+		GVK:        gvk("example.io", "v1", "Widget"),
+		Resource:   "widgets",
 		Namespaced: true,
 		// Only Getter is set — no Creater, Updater, etc.
 		Getter: GetFunc(func(ctx context.Context, name string) (*unstructured.Unstructured, error) {
@@ -287,8 +287,8 @@ func TestUnimplementedOperation_405(t *testing.T) {
 func TestRawHandler_Fallthrough(t *testing.T) {
 	var rawCalled bool
 	res := &Resource{
-		GVK:       gvk("example.io", "v1", "Widget"),
-		Resource:  "widgets",
+		GVK:        gvk("example.io", "v1", "Widget"),
+		Resource:   "widgets",
 		Namespaced: true,
 		RawHandler: func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
 			rawCalled = true
@@ -313,8 +313,8 @@ func TestRawHandler_Fallthrough(t *testing.T) {
 
 func TestRawHandler_NotCalledForRegisteredOp(t *testing.T) {
 	res := &Resource{
-		GVK:       gvk("example.io", "v1", "Widget"),
-		Resource:  "widgets",
+		GVK:        gvk("example.io", "v1", "Widget"),
+		Resource:   "widgets",
 		Namespaced: true,
 		Getter: GetFunc(func(ctx context.Context, name string) (*unstructured.Unstructured, error) {
 			return &unstructured.Unstructured{}, nil
@@ -338,8 +338,8 @@ func TestRawHandler_NotCalledForRegisteredOp(t *testing.T) {
 func TestSubresource_StatusGet(t *testing.T) {
 	var subCalled bool
 	res := &Resource{
-		GVK:       gvk("example.io", "v1", "Widget"),
-		Resource:  "widgets",
+		GVK:        gvk("example.io", "v1", "Widget"),
+		Resource:   "widgets",
 		Namespaced: true,
 		Subresources: []*Subresource{
 			{
@@ -374,8 +374,8 @@ func TestSubresource_StatusGet(t *testing.T) {
 func TestSubresource_ProxyRawHandler(t *testing.T) {
 	var rawCalled bool
 	res := &Resource{
-		GVK:       gvk("example.io", "v1", "Widget"),
-		Resource:  "widgets",
+		GVK:        gvk("example.io", "v1", "Widget"),
+		Resource:   "widgets",
 		Namespaced: true,
 		Subresources: []*Subresource{
 			{
@@ -424,8 +424,8 @@ func TestListWatch(t *testing.T) {
 	close(ch)
 
 	res := &Resource{
-		GVK:       gvk("example.io", "v1", "Widget"),
-		Resource:  "widgets",
+		GVK:        gvk("example.io", "v1", "Widget"),
+		Resource:   "widgets",
 		Namespaced: true,
 		Lister: &ListWatch{
 			ListFunc: func(ctx context.Context, opts metav1.ListOptions) (*unstructured.UnstructuredList, error) {

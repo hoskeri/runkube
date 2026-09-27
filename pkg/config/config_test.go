@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/hoskeri/procman/pkg/process"
 	"github.com/hoskeri/runkube/pkg/randid"
 )
 
@@ -51,46 +52,51 @@ func TestGenerateULADifferent(t *testing.T) {
 
 func TestParseLogLevels(t *testing.T) {
 	tests := []struct {
-		name    string
-		in      string
-		defLvl  slog.Level
-		over    map[string]slog.Level
+		name   string
+		in     string
+		def    slog.Level
+		defLvl slog.Level
+		over   map[string]slog.Level
 	}{{
-		name:    "bare default",
-		in:      "debug",
-		defLvl:  slog.LevelDebug,
+		name:   "bare default",
+		in:     "debug",
+		def:    slog.LevelError,
+		defLvl: slog.LevelDebug,
 	}, {
-		name:    "pairs only",
-		in:      "api=debug,node-a=warn",
-		defLvl:  slog.LevelInfo, // zero value: no bare level given
-		over:    map[string]slog.Level{"api": slog.LevelDebug, "node-a": slog.LevelWarn},
+		name:   "pairs only keep flag default",
+		in:     "api=debug,node-a=warn",
+		def:    slog.LevelError,
+		defLvl: slog.LevelError, // no bare level given -> flag default
+		over:   map[string]slog.Level{"api": slog.LevelDebug, "node-a": slog.LevelWarn},
 	}, {
-		name:    "default and overrides",
-		in:      "info,etcd=error,controller=debug",
-		defLvl:  slog.LevelInfo,
-		over:    map[string]slog.Level{"etcd": slog.LevelError, "controller": slog.LevelDebug},
+		name:   "default and overrides",
+		in:     "info,etcd=error,controller=debug",
+		def:    slog.LevelError,
+		defLvl: slog.LevelInfo,
+		over:   map[string]slog.Level{"etcd": slog.LevelError, "controller": slog.LevelDebug},
 	}, {
-		name:    "spaces tolerated",
-		in:      " warn , api = debug ",
-		defLvl:  slog.LevelWarn,
-		over:    map[string]slog.Level{"api": slog.LevelDebug},
+		name:   "spaces tolerated",
+		in:     " warn , api = debug ",
+		def:    slog.LevelError,
+		defLvl: slog.LevelWarn,
+		over:   map[string]slog.Level{"api": slog.LevelDebug},
 	}}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c := &Config{}
-			if err := parseLogLevels(c, tt.in); err != nil {
-				t.Fatalf("parseLogLevels(%q): %v", tt.in, err)
+			got, err := process.ParseLogLevels(tt.in, tt.def)
+			if err != nil {
+				t.Fatalf("ParseLogLevels(%q): %v", tt.in, err)
 			}
-			if c.LogLevel != tt.defLvl {
-				t.Errorf("LogLevel = %v, want %v", c.LogLevel, tt.defLvl)
+			if got.Default != tt.defLvl {
+				t.Errorf("Default = %v, want %v", got.Default, tt.defLvl)
 			}
-			if len(c.LogLevels) != len(tt.over) {
-				t.Fatalf("LogLevels = %v, want %v", c.LogLevels, tt.over)
+			if len(got.Tags) != len(tt.over) {
+				t.Fatalf("Tags = %v, want %v", got.Tags, tt.over)
 			}
 			for tag, want := range tt.over {
-				if got := c.LogLevels[tag]; got != want {
-					t.Errorf("LogLevels[%q] = %v, want %v", tag, got, want)
+				if got := got.Tags[tag]; got != want {
+					t.Errorf("Tags[%q] = %v, want %v", tag, got, want)
 				}
 			}
 		})
@@ -99,8 +105,8 @@ func TestParseLogLevels(t *testing.T) {
 
 func TestParseLogLevelsErrors(t *testing.T) {
 	for _, in := range []string{"", "verbose", "api=verbose", ",,", "=debug"} {
-		if err := parseLogLevels(&Config{}, in); err == nil {
-			t.Errorf("parseLogLevels(%q) succeeded, want error", in)
+		if _, err := process.ParseLogLevels(in, slog.LevelError); err == nil {
+			t.Errorf("ParseLogLevels(%q) succeeded, want error", in)
 		}
 	}
 }

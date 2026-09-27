@@ -76,20 +76,20 @@ type RawHandler func(ctx context.Context, w http.ResponseWriter, r *http.Request
 //
 // Always use &Resource{...}.
 type Resource struct {
-	GVK         schema.GroupVersionKind
-	Resource    string   // plural name, e.g. "buckets"
-	Namespaced  bool
-	Verbs       []string // nil → defaultVerbs; advisory for discovery only
+	GVK          schema.GroupVersionKind
+	Resource     string // plural name, e.g. "buckets"
+	Namespaced   bool
+	Verbs        []string // nil → defaultVerbs; advisory for discovery only
 	Subresources []*Subresource
 
-	Getter           Getter
-	Creater          Creater
-	Updater          Updater
-	Patcher          Patcher
-	Deleter          Deleter
+	Getter            Getter
+	Creater           Creater
+	Updater           Updater
+	Patcher           Patcher
+	Deleter           Deleter
 	CollectionDeleter CollectionDeleter
-	Lister           Lister
-	RawHandler       RawHandler
+	Lister            Lister
+	RawHandler        RawHandler
 
 	OpenAPIOperation func(verb string) map[string]any // nil → no enrichment
 	OpenAPISchema    func() map[string]any            // nil → generated minimal schema

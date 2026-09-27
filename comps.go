@@ -27,8 +27,7 @@ func (c *ControlPlane) selfBinary() string {
 func (c *ControlPlane) Etcd() *process.Process {
 	etcdName := fmt.Sprintf("%s-etcd", c.Name)
 	return &process.Process{
-		Tag:      "etcd",
-		LogLevel: c.logLevelFor("etcd"),
+		Tag: "etcd",
 		CmdArgs: []string{
 			"etcd",
 			"--name", etcdName,
@@ -58,8 +57,7 @@ func (c *ControlPlane) Etcd() *process.Process {
 // APIServer returns a process description for the kube-apiserver.
 func (c *ControlPlane) APIServer() *process.Process {
 	return &process.Process{
-		Tag:      "api",
-		LogLevel: c.logLevelFor("api"),
+		Tag: "api",
 		CmdArgs: []string{
 			"kube-apiserver",
 			"-v", "0",
@@ -128,8 +126,7 @@ func (c *ControlPlane) APIServer() *process.Process {
 // Controller returns a process description for the kube-controller-manager.
 func (c *ControlPlane) Controller() *process.Process {
 	return &process.Process{
-		Tag:      "controller",
-		LogLevel: c.logLevelFor("controller"),
+		Tag: "controller",
 		CmdArgs: []string{
 			"kube-controller-manager",
 
@@ -157,8 +154,7 @@ func (c *ControlPlane) Controller() *process.Process {
 // Scheduler returns a process description for the kube-scheduler.
 func (c *ControlPlane) Scheduler() *process.Process {
 	return &process.Process{
-		Tag:      "scheduler",
-		LogLevel: c.logLevelFor("scheduler"),
+		Tag: "scheduler",
 		CmdArgs: []string{
 			"kube-scheduler",
 
@@ -184,8 +180,7 @@ func (c *ControlPlane) Scheduler() *process.Process {
 // Webhook returns a process description for the internal webhook.
 func (c *ControlPlane) Webhook() *process.Process {
 	return &process.Process{
-		Tag:      "webhook",
-		LogLevel: c.logLevelFor("webhook"),
+		Tag: "webhook",
 		CmdArgs: []string{
 			c.selfBinary(),
 			"webhook",
@@ -196,8 +191,7 @@ func (c *ControlPlane) Webhook() *process.Process {
 // KMSPlugin returns a process description for the internal KMS plugin.
 func (c *ControlPlane) KMSPlugin() *process.Process {
 	return &process.Process{
-		Tag:      "kms",
-		LogLevel: c.logLevelFor("kms"),
+		Tag: "kms",
 		CmdArgs: []string{
 			c.selfBinary(),
 			"kms",
@@ -208,8 +202,7 @@ func (c *ControlPlane) KMSPlugin() *process.Process {
 // JWTSigner returns a process description for the internal JWT signer.
 func (c *ControlPlane) JWTSigner() *process.Process {
 	return &process.Process{
-		Tag:      "jwtsigner",
-		LogLevel: c.logLevelFor("jwtsigner"),
+		Tag: "jwtsigner",
 		CmdArgs: []string{
 			c.selfBinary(),
 			"jwtsigner",

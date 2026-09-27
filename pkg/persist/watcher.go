@@ -17,9 +17,9 @@ type WatchOptions struct{}
 // Watcher manages active watch subscriptions and notifies them when
 // the DB is mutated. Created lazily by DB on the first Watch call.
 type Watcher struct {
-	mu      sync.Mutex
-	nextID  int64
-	subs    map[int64]*sub
+	mu     sync.Mutex
+	nextID int64
+	subs   map[int64]*sub
 }
 
 type watchEvent struct {
@@ -29,12 +29,12 @@ type watchEvent struct {
 }
 
 type sub struct {
-	id       int64
-	matcher  *Matcher
-	events   chan watchEvent // receives from write-tx OnCommit
-	result   chan watch.Event
-	stop     chan struct{} // closed by Stop()
-	stopped  chan struct{} // closed when goroutine exits
+	id      int64
+	matcher *Matcher
+	events  chan watchEvent // receives from write-tx OnCommit
+	result  chan watch.Event
+	stop    chan struct{} // closed by Stop()
+	stopped chan struct{} // closed when goroutine exits
 }
 
 // NewWatcher creates an empty Watcher.

@@ -19,9 +19,9 @@ var defaultAPIGroups = []*kapi.Group{
 		GroupVersion: schema.GroupVersion{Group: "example-b.runkube.internal", Version: "v1"},
 		Resources: []*kapi.Resource{
 			{
-				GVK:      schema.GroupVersionKind{Group: "example-b.runkube.internal", Version: "v1", Kind: "ExampleB"},
+				GVK:        schema.GroupVersionKind{Group: "example-b.runkube.internal", Version: "v1", Kind: "ExampleB"},
 				Namespaced: true,
-				Resource: "examplesb",
+				Resource:   "examplesb",
 			},
 		},
 	},

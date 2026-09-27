@@ -8,14 +8,14 @@ import (
 
 // Context carries request info (like http.Request)
 type Context struct {
-	PID       uint32
-	Syscall   int32       // Actual syscall number (SYS_OPENAT, etc.)
-	Method    string      // Normalized method ("OPEN", "STAT", etc.)
-	Path      string      // Resolved path
-	Args      [6]uint64   // Raw syscall args
-	DirFD     int         // Resolved dirfd (AT_FDCWD = -100)
-	Flags     uint64      // Open flags (for OPEN)
-	Mask      uint32      // Statx mask (for STATX)
+	PID     uint32
+	Syscall int32     // Actual syscall number (SYS_OPENAT, etc.)
+	Method  string    // Normalized method ("OPEN", "STAT", etc.)
+	Path    string    // Resolved path
+	Args    [6]uint64 // Raw syscall args
+	DirFD   int       // Resolved dirfd (AT_FDCWD = -100)
+	Flags   uint64    // Open flags (for OPEN)
+	Mask    uint32    // Statx mask (for STATX)
 
 	// Response helpers (like http.ResponseWriter)
 	Respond Responder
@@ -306,14 +306,14 @@ type Registry interface {
 
 // SyscallMeta describes a syscall for filter generation and argument parsing
 type SyscallMeta struct {
-	Number       int32
-	Name         string
-	Method       string      // Normalized method: OPEN, STAT, STATX, STATFS, READLINK, UNAME
-	PathArgIdx   int         // Which arg holds the path pointer (-1 if none)
-	DirFDArgIdx  int         // Which arg holds dirfd for *at syscalls (-1 if none)
-	FlagsArgIdx  int         // Which arg holds flags (for openat2, etc.)
-	MaskArgIdx   int         // Which arg holds mask (for statx)
-	ReturnType   ReturnType  // How to handle return value
+	Number      int32
+	Name        string
+	Method      string     // Normalized method: OPEN, STAT, STATX, STATFS, READLINK, UNAME
+	PathArgIdx  int        // Which arg holds the path pointer (-1 if none)
+	DirFDArgIdx int        // Which arg holds dirfd for *at syscalls (-1 if none)
+	FlagsArgIdx int        // Which arg holds flags (for openat2, etc.)
+	MaskArgIdx  int        // Which arg holds mask (for statx)
+	ReturnType  ReturnType // How to handle return value
 }
 
 // ReturnType describes how the syscall returns data
@@ -321,12 +321,12 @@ type ReturnType int
 
 const (
 	ReturnFD       ReturnType = iota // Returns file descriptor (open family)
-	ReturnInt                         // Returns int (most syscalls)
-	ReturnStat                        // Writes to struct pointer (stat family)
-	ReturnStatx                       // Writes to statx struct (statx)
-	ReturnStatfs                      // Writes to statfs struct (statfs)
-	ReturnReadlink                    // Writes to buffer (readlink family)
-	ReturnUname                       // Writes to utsname struct (uname)
+	ReturnInt                        // Returns int (most syscalls)
+	ReturnStat                       // Writes to struct pointer (stat family)
+	ReturnStatx                      // Writes to statx struct (statx)
+	ReturnStatfs                     // Writes to statfs struct (statfs)
+	ReturnReadlink                   // Writes to buffer (readlink family)
+	ReturnUname                      // Writes to utsname struct (uname)
 )
 
 // SupervisorConfig holds the configuration for the supervisor loop

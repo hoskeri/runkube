@@ -39,10 +39,13 @@ type ControlPlane struct {
 
 // Run starts the control plane components.
 func (c *ControlPlane) Run(ctx context.Context) error {
+	logs := termhandler.New(ctx, os.Stdin, os.Stdout, os.Stderr, &termhandler.Options{
+		Level: slog.LevelInfo,
+	})
+	defer logs.Close()
+
 	fm := &process.Formation{
-		Sink: slog.New(termhandler.New(os.Stdout, &termhandler.Options{
-			Level: slog.LevelInfo,
-		})),
+		Logs: logs,
 		Processes: slices.Concat([]*process.Process{
 			c.Etcd(),
 			c.APIServer(),
@@ -52,20 +55,11 @@ func (c *ControlPlane) Run(ctx context.Context) error {
 			c.KMSPlugin(),
 			c.JWTSigner(),
 		}, c.nodeProcesses()),
-		Workdir: c.Root,
+		Workdir:   c.Root,
+		LogLevels: c.LogLevels,
 	}
 
 	return fm.Run(ctx)
-}
-
-// logLevelFor returns the effective log level for a component tag: an
-// explicit --log-level override wins, otherwise the default level applies.
-func (c *ControlPlane) logLevelFor(tag string) slog.Level {
-	if lvl, ok := c.LogLevels[tag]; ok {
-		return lvl
-	}
-
-	return c.LogLevel
 }
 
 func (c *ControlPlane) hostname(tag string) string {
@@ -395,7 +389,7 @@ func (c *ControlPlane) node(nodeName string) *nodes.Node {
 		Kubeconfig:    c.kubeConfigRef(nodeName).Path,
 		KubeletBinary: kp,
 		MachineID:     hex.EncodeToString(h.Sum(nil)[0:16]),
-		LogLevel:      c.logLevelFor(nodeName),
+		LogLevel:      c.LogLevels.For(nodeName),
 	}
 }
 
@@ -416,10 +410,9 @@ func (c *ControlPlane) nodeProcesses() []*process.Process {
 		}
 
 		ps = append(ps, &process.Process{
-			Tag:      n,
-			LogLevel: c.logLevelFor(n),
-			CmdArgs:  []string{c.selfBinary(), "node"},
-			Environ:  []string{env},
+			Tag:     n,
+			CmdArgs: []string{c.selfBinary(), "node"},
+			Environ: []string{env},
 		})
 	}
 

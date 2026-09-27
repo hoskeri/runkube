@@ -7,8 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strings"
 
+	"github.com/hoskeri/procman/pkg/process"
 	"github.com/hoskeri/runkube/pkg/randid"
 	"github.com/spf13/pflag"
 )
@@ -22,13 +22,10 @@ type Config struct {
 	ExternalHostname    string       `json:"externalHostname"`
 	ServiceAddressRange netip.Prefix `json:"serviceAddressRange"`
 	Nodes               []string     `json:"nodes"`
-	// LogLevel is the default log level for control-plane components and
-	// nodes, applied to any component without an explicit override.
-	LogLevel slog.Level `json:"logLevel"`
-	// LogLevels maps component tags to overridden log levels. Tags are the
-	// component names (etcd, api, controller, scheduler, webhook, kms,
-	// jwtsigner) and the node names.
-	LogLevels map[string]slog.Level `json:"logLevels,omitempty"`
+	// LogLevels is the default log level for control-plane components and
+	// nodes plus per-tag overrides. Tags are the component names (etcd, api,
+	// controller, scheduler, webhook, kms, jwtsigner) and the node names.
+	LogLevels process.LogLevels `json:"logLevels"`
 }
 
 // Parse parses the command line flags and returns the configuration.
@@ -49,10 +46,12 @@ func Parse() (Config, []string) {
 
 	fs.Parse(os.Args[1:])
 
-	if err := parseLogLevels(&c, logLevels); err != nil {
+	parsedLevels, err := process.ParseLogLevels(logLevels, slog.LevelError)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "invalid log-level %q: %v\n", logLevels, err)
 		os.Exit(1)
 	}
+	c.LogLevels = parsedLevels
 	if serviceAddressRange == "" {
 		c.ServiceAddressRange = randid.ULA(c.Name)
 	} else {
@@ -70,69 +69,6 @@ func Parse() (Config, []string) {
 	}
 
 	return c, fs.Args()
-}
-
-// parseLevel parses a level name accepted by --log-level.
-func parseLevel(s string) (slog.Level, error) {
-	switch s {
-	case "error":
-		return slog.LevelError, nil
-	case "warn":
-		return slog.LevelWarn, nil
-	case "info":
-		return slog.LevelInfo, nil
-	case "debug":
-		return slog.LevelDebug, nil
-	}
-
-	return 0, fmt.Errorf("unknown level %q (want error, warn, info or debug)", s)
-}
-
-// parseLogLevels splits a --log-level value into a default level and
-// per-component overrides: bare entries set the default, tag=level entries
-// set an override for that component.
-func parseLogLevels(c *Config, s string) error {
-	if s == "" {
-		return fmt.Errorf("empty")
-	}
-
-	parsed := false
-	for part := range strings.SplitSeq(s, ",") {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
-
-		if tag, lvlStr, ok := strings.Cut(part, "="); ok {
-			tag = strings.TrimSpace(tag)
-			if tag == "" {
-				return fmt.Errorf("empty component tag in %q", part)
-			}
-			lvl, err := parseLevel(strings.TrimSpace(lvlStr))
-			if err != nil {
-				return err
-			}
-			if c.LogLevels == nil {
-				c.LogLevels = map[string]slog.Level{}
-			}
-			c.LogLevels[tag] = lvl
-			parsed = true
-			continue
-		}
-
-		lvl, err := parseLevel(part)
-		if err != nil {
-			return err
-		}
-		c.LogLevel = lvl
-		parsed = true
-	}
-
-	if !parsed {
-		return fmt.Errorf("no levels specified")
-	}
-
-	return nil
 }
 
 // Validate validates the configuration.
