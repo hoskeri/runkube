@@ -2,6 +2,7 @@ package cri
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 

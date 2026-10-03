@@ -25,6 +25,7 @@ const DefaultTickDuration = 100 * time.Millisecond
 // override (falling back to Options.Delays) (decision D5).
 type OpKind int
 
+// Sandbox operation constants.
 const (
 	OpSandboxStart OpKind = iota
 	OpSandboxStop
@@ -73,6 +74,7 @@ func (d DelayConfig) forKind(k OpKind) Ticks {
 // ObjectKind identifies what kind of object an ObjectRef points at.
 type ObjectKind int
 
+// ObjectSandbox represents a Kubernetes Object reference for a sandbox
 const (
 	ObjectSandbox ObjectKind = iota
 	ObjectContainer

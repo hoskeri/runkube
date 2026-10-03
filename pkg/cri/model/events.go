@@ -12,6 +12,7 @@ const subscriptionBuffer = 128
 // EventKind identifies the kind of a model event.
 type EventKind int
 
+// Event tracking constants.
 const (
 	EventSandboxCreated EventKind = iota
 	EventSandboxRemoved
