@@ -1,10 +1,7 @@
 package cri
 
 import (
-	"context"
-	"errors"
 	"testing"
-	"time"
 
 	"github.com/hoskeri/runkube/pkg/cri/model"
 	criv1 "k8s.io/cri-api/pkg/apis/runtime/v1"
