@@ -1,10 +1,39 @@
 package server
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"time"
 )
+
+// loggerKey is the context key under which a per-component logger travels.
+type loggerKey struct{}
+
+// WithContextLogger returns a copy of ctx carrying logger. The frontend uses
+// it to attach a backend's component logger to each proxied request, so
+// handlers can log through FromContext without every handler type growing a
+// logger parameter.
+func WithContextLogger(ctx context.Context, logger *slog.Logger) context.Context {
+	return context.WithValue(ctx, loggerKey{}, logger)
+}
+
+// FromContext returns the logger attached to ctx by WithContextLogger, or
+// slog.Default() when none is present.
+func FromContext(ctx context.Context) *slog.Logger {
+	if l, ok := ctx.Value(loggerKey{}).(*slog.Logger); ok && l != nil {
+		return l
+	}
+	return slog.Default()
+}
+
+// WithLogger injects logger into the request context before invoking h, so
+// the wrapped handler can log through FromContext.
+func WithLogger(logger *slog.Logger, h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		h.ServeHTTP(w, req.WithContext(WithContextLogger(req.Context(), logger)))
+	})
+}
 
 type loggingResponseWriter struct {
 	http.ResponseWriter
@@ -65,7 +94,10 @@ func newLoggingResponseWriter(w http.ResponseWriter) *loggingResponseWriter {
 	}
 }
 
-func WithLogging(h http.Handler) http.Handler {
+func WithLogging(logger *slog.Logger, h http.Handler) http.Handler {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		ctx := req.Context()
 
@@ -81,7 +113,7 @@ func WithLogging(h http.Handler) http.Handler {
 			lvl = slog.LevelDebug
 		}
 
-		slog.Log(ctx, lvl, "http.request",
+		logger.Log(ctx, lvl, "http.request",
 			"m", req.Method,
 			"sni", req.TLS.ServerName,
 			"host", req.Host,
@@ -93,29 +125,32 @@ func WithLogging(h http.Handler) http.Handler {
 	})
 }
 
-func WithMatchingHost(h http.Handler, n string) http.Handler {
+func WithMatchingHost(logger *slog.Logger, h http.Handler, n string) http.Handler {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	nh := n + ":443"
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if n == "" {
-			slog.Error("with-matching-host server name not configured", "host", n)
+			logger.Error("with-matching-host server name not configured", "host", n)
 			http.Error(w, "", http.StatusInternalServerError)
 			return
 		}
 
 		if req.TLS == nil {
-			slog.Error("with-matching-host not tls request", "req.url", req.URL)
+			logger.Error("with-matching-host not tls request", "req.url", req.URL)
 			http.Error(w, "", http.StatusBadGateway)
 			return
 		}
 
 		if req.TLS.ServerName != n {
-			slog.Error("with-matching-host sni mismatch", "got", req.TLS.ServerName, "want", n)
+			logger.Error("with-matching-host sni mismatch", "got", req.TLS.ServerName, "want", n)
 			http.Error(w, "", http.StatusBadGateway)
 			return
 		}
 
 		if !(req.Host == n || req.Host == nh) {
-			slog.Error("with-matching-host host header mismatch", "got", req.Host, "want", n)
+			logger.Error("with-matching-host host header mismatch", "got", req.Host, "want", n)
 			http.Error(w, "", http.StatusBadGateway)
 			return
 		}

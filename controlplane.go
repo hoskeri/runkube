@@ -40,7 +40,8 @@ type ControlPlane struct {
 // Run starts the control plane components.
 func (c *ControlPlane) Run(ctx context.Context) error {
 	logs := termhandler.New(ctx, os.Stdin, os.Stdout, os.Stderr, &termhandler.Options{
-		Level: slog.LevelInfo,
+		Level:   slog.LevelInfo,
+		Columns: -1,
 	})
 	defer logs.Close()
 

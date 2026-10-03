@@ -20,10 +20,21 @@ import (
 type Service struct {
 	mux       *http.ServeMux
 	apiGroups []*Group
+	logger    *slog.Logger
 }
 
+// NewAPI builds a Service with the default logger.
 func NewAPI(groups ...*Group) *Service {
-	s := &Service{mux: http.NewServeMux(), apiGroups: groups}
+	return NewAPIWithLogger(slog.Default(), groups...)
+}
+
+// NewAPIWithLogger builds a Service that logs through logger (nil falls back
+// to slog.Default()), so an embedded API server can present its own tag.
+func NewAPIWithLogger(logger *slog.Logger, groups ...*Group) *Service {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	s := &Service{mux: http.NewServeMux(), apiGroups: groups, logger: logger}
 	s.installGlobal()
 	for _, g := range groups {
 		g.install(s.mux)
@@ -47,7 +58,7 @@ func (s *Service) APIServices(caBundle []byte, namespace, name string) iter.Seq[
 
 func (s *Service) installGlobal() {
 	s.mux.HandleFunc("/{a...}", func(w http.ResponseWriter, r *http.Request) {
-		slog.Debug("kapi: no matching resource", "method", r.Method, "path", r.URL.Path)
+		s.logger.Debug("kapi: no matching resource", "method", r.Method, "path", r.URL.Path)
 		writeStatus(w, http.StatusNotFound, fmt.Errorf("%s not found", r.URL.Path))
 	})
 

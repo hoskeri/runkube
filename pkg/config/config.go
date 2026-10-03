@@ -23,8 +23,10 @@ type Config struct {
 	ServiceAddressRange netip.Prefix `json:"serviceAddressRange"`
 	Nodes               []string     `json:"nodes"`
 	// LogLevels is the default log level for control-plane components and
-	// nodes plus per-tag overrides. Tags are the component names (etcd, api,
-	// controller, scheduler, webhook, kms, jwtsigner) and the node names.
+	// nodes plus per-tag overrides. Overrides name a process tag (etcd, api,
+	// controller, scheduler, webhook, kms, jwtsigner), a node name, or an
+	// in-process component as either its full path (webhook/validate) or its
+	// component name alone (validate).
 	LogLevels process.LogLevels `json:"logLevels"`
 }
 

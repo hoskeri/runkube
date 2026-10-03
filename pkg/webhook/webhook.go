@@ -17,6 +17,8 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
+
+	"github.com/hoskeri/runkube/pkg/server"
 )
 
 var (
@@ -198,11 +200,12 @@ func (admitter Admitter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 	admResponse, err := admitter(ctx, admReq.Request)
 	if err != nil {
-		slog.Log(req.Context(), lvl, "admission.error", "", admLogValue(admReq.Request), "", admResponseLogValue(admReq.Response))
+		logger := server.FromContext(req.Context())
+		logger.Log(req.Context(), lvl, "admission.error", "", admLogValue(admReq.Request), "", admResponseLogValue(admReq.Response))
 		writeStatus(w, http.StatusInternalServerError, err)
 		return
 	}
-	slog.Log(req.Context(), lvl, "admission", "", admLogValue(admReq.Request), "", admResponseLogValue(admResponse))
+	server.FromContext(req.Context()).Log(req.Context(), lvl, "admission", "", admLogValue(admReq.Request), "", admResponseLogValue(admResponse))
 
 	admResponse.UID = admReq.Request.UID
 	encode(w, &admv1.AdmissionReview{
@@ -260,7 +263,7 @@ func (authorizer Authorizer) ServeHTTP(w http.ResponseWriter, req *http.Request)
 		writeStatus(w, http.StatusInternalServerError, err)
 		return
 	}
-	slog.Debug("authorize", "", sarLogValue(&sarReq.Spec, sarStatus))
+	server.FromContext(ctx).Debug("authorize", "", sarLogValue(&sarReq.Spec, sarStatus))
 	encode(w, &authzv1.SubjectAccessReview{
 		Status: *sarStatus,
 	})

@@ -7,9 +7,11 @@ import (
 	"net/url"
 	"slices"
 
+	"github.com/hoskeri/procman/pkg/writelog"
 	"github.com/hoskeri/runkube/pkg/frontend"
 	"github.com/hoskeri/runkube/pkg/kapi"
 	"github.com/hoskeri/runkube/pkg/pki"
+	"github.com/hoskeri/runkube/pkg/server"
 	"github.com/hoskeri/runkube/pkg/webhook"
 	admv1 "k8s.io/api/admission/v1"
 	radmv1 "k8s.io/api/admissionregistration/v1"
@@ -62,9 +64,9 @@ func builtinAuthenticator() webhook.Authenticator {
 }
 
 func builtinAuditor() webhook.Auditor {
-	return func(_ context.Context, ev runtime.Object) error {
+	return func(ctx context.Context, ev runtime.Object) error {
 		content := ev.(*unstructured.Unstructured)
-		slog.Debug("audit", "ev", content)
+		server.FromContext(ctx).Debug("event", "ev", content)
 		return nil
 	}
 }
@@ -168,33 +170,52 @@ func (c *ControlPlane) makeAdmissionWebhook() error {
 	return nil
 }
 
-// RunWebhook starts the internal webhook server.
+// RunWebhook starts the internal webhook server.  Every component hosted in
+// this one process gets its own tagged logger (rendered by the parent
+// formation as "webhook/<tag>") via writelog.TaggedLogger, so the frontend and
+// each admission/authentication/authorization backend stay distinguishable in
+// the shared log stream.
 func (c *ControlPlane) RunWebhook(ctx context.Context) error {
-	ff := frontend.New()
+	// This subcommand stays in-process and hosts several components; frame its
+	// own records up to the parent formation and let each component's
+	// TaggedLogger reuse that one framer.  Only the in-process subcommands do
+	// this: the exec'd apiserver/etcd/controller/scheduler binaries must keep
+	// blocking stdio.
+	if _, stderr := writelog.ChildSinks(); stderr != nil {
+		slog.SetDefault(stderr)
+	}
+
+	ff := frontend.New(writelog.TaggedLogger("frontend"))
 	for _, o := range []frontend.BackendServer{
 		{
 			ServerName: &url.URL{Scheme: "https", Host: "api-runkube-internal.kube-system.svc"},
-			Handler:    kapi.NewAPI(defaultAPIGroups...),
+			Handler:    kapi.NewAPIWithLogger(writelog.TaggedLogger("api"), defaultAPIGroups...),
+			Logger:     writelog.TaggedLogger("api"),
 		},
 		{
 			ServerName: c.internalURL("authentication-webhook"),
 			Handler:    builtinAuthenticator(),
+			Logger:     writelog.TaggedLogger("authn"),
 		},
 		{
 			ServerName: c.internalURL("authorization-webhook"),
 			Handler:    builtinAuthorizer(),
+			Logger:     writelog.TaggedLogger("authz"),
 		},
 		{
 			ServerName: c.internalURL("audit-webhook"),
 			Handler:    builtinAuditor(),
+			Logger:     writelog.TaggedLogger("audit"),
 		},
 		{
 			ServerName: c.internalURL("validating-webhook"),
 			Handler:    builtinAdmitter(false),
+			Logger:     writelog.TaggedLogger("validate"),
 		},
 		{
 			ServerName: c.internalURL("mutating-webhook"),
 			Handler:    builtinAdmitter(true),
+			Logger:     writelog.TaggedLogger("mutate"),
 		},
 	} {
 		cert, err := c.pkiStore().Leaf("webhook-server").TLSCertificate()

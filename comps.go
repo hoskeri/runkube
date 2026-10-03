@@ -146,7 +146,7 @@ func (c *ControlPlane) Controller() *process.Process {
 			"--authentication-tolerate-lookup-failure=true",
 
 			"--use-service-account-credentials=true",
-			"--controllers", "*,-serviceaccount-token-controller,-legacy-serviceaccount-token-cleaner-controller",
+			"--controllers", "*,-serviceaccount-token-controller,-legacy-serviceaccount-token-cleaner-controller,-certificatesigningrequest-signing-controller",
 		},
 	}
 }
@@ -177,14 +177,23 @@ func (c *ControlPlane) Scheduler() *process.Process {
 	}
 }
 
+// childConfigFlags returns the flags a re-executed runkube subcommand needs to
+// reconstruct the parent's configuration. Subcommands whose whole lifetime is
+// one CLI invocation (kms, jwtsigner, webhook) re-enter config.Parse from
+// os.Args, so without these they silently fall back to cluster name "default"
+// and the default root.
+func (c *ControlPlane) childConfigFlags() []string {
+	return []string{"--name", c.Name, "--root", c.Root}
+}
+
 // Webhook returns a process description for the internal webhook.
 func (c *ControlPlane) Webhook() *process.Process {
 	return &process.Process{
 		Tag: "webhook",
-		CmdArgs: []string{
+		CmdArgs: append([]string{
 			c.selfBinary(),
 			"webhook",
-		},
+		}, c.childConfigFlags()...),
 	}
 }
 
@@ -192,10 +201,10 @@ func (c *ControlPlane) Webhook() *process.Process {
 func (c *ControlPlane) KMSPlugin() *process.Process {
 	return &process.Process{
 		Tag: "kms",
-		CmdArgs: []string{
+		CmdArgs: append([]string{
 			c.selfBinary(),
 			"kms",
-		},
+		}, c.childConfigFlags()...),
 	}
 }
 
@@ -203,10 +212,10 @@ func (c *ControlPlane) KMSPlugin() *process.Process {
 func (c *ControlPlane) JWTSigner() *process.Process {
 	return &process.Process{
 		Tag: "jwtsigner",
-		CmdArgs: []string{
+		CmdArgs: append([]string{
 			c.selfBinary(),
 			"jwtsigner",
-		},
+		}, c.childConfigFlags()...),
 	}
 }
 

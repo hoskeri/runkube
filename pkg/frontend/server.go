@@ -25,12 +25,19 @@ type Frontend interface {
 type frontend struct {
 	mu       sync.Mutex
 	backends map[key]*backend
+	logger   *slog.Logger
 }
 
-// New creates a new frontend server.
-func New() Frontend {
+// New creates a new frontend server.  logger is the frontend's own component
+// logger (used for proxy and registration messages); nil falls back to
+// slog.Default().
+func New(logger *slog.Logger) Frontend {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &frontend{
 		backends: map[key]*backend{},
+		logger:   logger,
 	}
 }
 
@@ -39,6 +46,10 @@ type BackendServer struct {
 	ServerName *url.URL
 	Handler    http.Handler
 	ServerCert func(*tls.ClientHelloInfo) (*tls.Certificate, error)
+	// Logger is the component logger applied to this backend's requests and
+	// error paths, so each proxied component logs under its own tag.  nil
+	// falls back to the frontend's logger.
+	Logger *slog.Logger
 }
 
 func (f *frontend) Register(b ...BackendServer) error {
@@ -70,18 +81,30 @@ func (f *frontend) registerOne(o BackendServer) error {
 	f.backends[bk] = b
 	f.mu.Unlock()
 
-	slog.Info("register", "k", bk, "backend", o.ServerName)
+	logger := o.Logger
+	if logger == nil {
+		logger = f.logger
+	}
+	logger.Info("register", "k", bk, "backend", o.ServerName)
 	return nil
 }
 
 func (f *frontend) serve(b *backend) error {
+	logger := b.o.Logger
+	if logger == nil {
+		logger = f.logger
+	}
+
+	h := server.WithLogger(logger, b.o.Handler)
+	h = server.WithMatchingHost(logger, h, b.o.ServerName.Hostname())
+
 	s := &http.Server{
 		Addr: b.k.String(),
 		TLSConfig: &tls.Config{
 			ClientAuth:     tls.RequestClientCert,
 			GetCertificate: b.o.ServerCert,
 		},
-		Handler: server.WithLogging(server.WithMatchingHost(b.o.Handler, b.o.ServerName.Hostname())),
+		Handler: server.WithLogging(logger, h),
 	}
 
 	return s.ServeTLS(b, "", "")
@@ -101,29 +124,29 @@ func (f *frontend) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	a, err := backendKey(r.URL)
 	if err != nil {
-		slog.Error("error building backend key", "err", err, "req", r.URL)
+		f.logger.Error("error building backend key", "err", err, "req", r.URL)
 		http.Error(w, fmt.Errorf("bad proxy host: %w", err).Error(), http.StatusBadRequest)
 		return
 	}
 
 	b, err := f.backendFor(a)
 	if err != nil {
-		slog.Error("error getting backend", "err", err, "k", a)
+		f.logger.Error("error getting backend", "err", err, "k", a)
 		http.Error(w, fmt.Errorf("proxy host not found: %w", err).Error(), http.StatusBadGateway)
 		return
 	}
 
 	clientConn, _, err := hijacker.Hijack()
 	if err != nil {
-		slog.Error("error hijacking", "err", err, "k", a)
+		f.logger.Error("error hijacking", "err", err, "k", a)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	if err := b.AddConn(clientConn); err != nil {
-		slog.Error("backend.AddConn error", "b", b.k, "err", err)
+		f.logger.Error("backend.AddConn error", "b", b.k, "err", err)
 		if err := clientConn.Close(); err != nil {
-			slog.Error("clientConn.Close", "conn", clientConn.LocalAddr().String())
+			f.logger.Error("clientConn.Close", "conn", clientConn.LocalAddr().String())
 			return
 		}
 	}
