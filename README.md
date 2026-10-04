@@ -19,3 +19,7 @@ Starting `runkube` will start a standard Kubernetes control plane and nodes.
 - Fake CRI service
 - Sandbox and filesystem stubs to enable running kubelet
   without any privileges (unprivileged user namespaces required)
+
+Every control-plane component (and every component inside a node's sandbox)
+reports health, and the cluster is torn down only when a critical component
+stays unhealthy past `--health-grace`. See [docs/HEALTH.md](docs/HEALTH.md).

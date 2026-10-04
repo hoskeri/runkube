@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -26,7 +27,7 @@ func (c *ControlPlane) selfBinary() string {
 // Etcd returns a process description for the etcd server.
 func (c *ControlPlane) Etcd() *process.Process {
 	etcdName := fmt.Sprintf("%s-etcd", c.Name)
-	return &process.Process{
+	return c.withHealth(&process.Process{
 		Tag: "etcd",
 		CmdArgs: []string{
 			"etcd",
@@ -51,12 +52,12 @@ func (c *ControlPlane) Etcd() *process.Process {
 			"--trusted-ca-file", c.pkiStore().CACertPath(pki.Etcd),
 			"--peer-trusted-ca-file", c.pkiStore().CACertPath(pki.Etcd),
 		},
-	}
+	}, c.probeEtcd)
 }
 
 // APIServer returns a process description for the kube-apiserver.
 func (c *ControlPlane) APIServer() *process.Process {
-	return &process.Process{
+	return c.withHealth(&process.Process{
 		Tag: "api",
 		CmdArgs: []string{
 			"kube-apiserver",
@@ -120,12 +121,12 @@ func (c *ControlPlane) APIServer() *process.Process {
 
 			"--egress-selector-config-file", c.configRef("egress-selector-config").Path,
 		},
-	}
+	}, c.probeAPIServer)
 }
 
 // Controller returns a process description for the kube-controller-manager.
 func (c *ControlPlane) Controller() *process.Process {
-	return &process.Process{
+	return c.withHealth(&process.Process{
 		Tag: "controller",
 		CmdArgs: []string{
 			"kube-controller-manager",
@@ -137,6 +138,7 @@ func (c *ControlPlane) Controller() *process.Process {
 
 			"--leader-elect=false",
 			"--bind-address", c.internalListenAddr().String(),
+			"--secure-port", strconv.Itoa(controllerManagerPort),
 			"--tls-cert-file", c.pkiStore().Leaf("controller-manager-server").CertPath(),
 			"--tls-private-key-file", c.pkiStore().Leaf("controller-manager-server").KeyPath(),
 
@@ -148,12 +150,12 @@ func (c *ControlPlane) Controller() *process.Process {
 			"--use-service-account-credentials=true",
 			"--controllers", "*,-serviceaccount-token-controller,-legacy-serviceaccount-token-cleaner-controller,-certificatesigningrequest-signing-controller",
 		},
-	}
+	}, c.probeComponentStatus(pki.APIClient, "controller-manager-server", controllerManagerPort, "/healthz"))
 }
 
 // Scheduler returns a process description for the kube-scheduler.
 func (c *ControlPlane) Scheduler() *process.Process {
-	return &process.Process{
+	return c.withHealth(&process.Process{
 		Tag: "scheduler",
 		CmdArgs: []string{
 			"kube-scheduler",
@@ -164,6 +166,7 @@ func (c *ControlPlane) Scheduler() *process.Process {
 			"--logging-format=json",
 
 			"--bind-address", c.internalListenAddr().String(),
+			"--secure-port", strconv.Itoa(schedulerPort),
 			"--tls-cert-file", c.pkiStore().Leaf("scheduler-server").CertPath(),
 			"--tls-private-key-file", c.pkiStore().Leaf("scheduler-server").KeyPath(),
 
@@ -174,7 +177,7 @@ func (c *ControlPlane) Scheduler() *process.Process {
 			"--authorization-kubeconfig", c.kubeConfigRef("scheduler-authnz").Path,
 			"--authentication-tolerate-lookup-failure=true",
 		},
-	}
+	}, c.probeComponentStatus(pki.APIClient, "scheduler-server", schedulerPort, "/livez", readyPath))
 }
 
 // childConfigFlags returns the flags a re-executed runkube subcommand needs to
@@ -188,35 +191,35 @@ func (c *ControlPlane) childConfigFlags() []string {
 
 // Webhook returns a process description for the internal webhook.
 func (c *ControlPlane) Webhook() *process.Process {
-	return &process.Process{
+	return c.withHealth(&process.Process{
 		Tag: "webhook",
 		CmdArgs: append([]string{
 			c.selfBinary(),
 			"webhook",
 		}, c.childConfigFlags()...),
-	}
+	}, c.probeWebhookFrontend)
 }
 
 // KMSPlugin returns a process description for the internal KMS plugin.
 func (c *ControlPlane) KMSPlugin() *process.Process {
-	return &process.Process{
+	return c.withHealth(&process.Process{
 		Tag: "kms",
 		CmdArgs: append([]string{
 			c.selfBinary(),
 			"kms",
 		}, c.childConfigFlags()...),
-	}
+	}, probeUnixSocketAccepting(c.unixSocketURL("kms").Opaque))
 }
 
 // JWTSigner returns a process description for the internal JWT signer.
 func (c *ControlPlane) JWTSigner() *process.Process {
-	return &process.Process{
+	return c.withHealth(&process.Process{
 		Tag: "jwtsigner",
 		CmdArgs: append([]string{
 			c.selfBinary(),
 			"jwtsigner",
 		}, c.childConfigFlags()...),
-	}
+	}, probeUnixSocketAccepting(c.unixSocketURL("jwtsigner").Opaque))
 }
 
 func makeSafeEnv(env []string) []string {

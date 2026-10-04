@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"time"
 
 	"github.com/hoskeri/procman/pkg/process"
 	"github.com/hoskeri/runkube/pkg/randid"
@@ -28,6 +29,10 @@ type Config struct {
 	// in-process component as either its full path (webhook/validate) or its
 	// component name alone (validate).
 	LogLevels process.LogLevels `json:"logLevels"`
+	// HealthGrace is how long a critical component (etcd, the apiserver) may
+	// stay unhealthy before the control plane tears the formation down.
+	// Anything shorter risks killing a cluster over a momentary probe failure.
+	HealthGrace time.Duration `json:"healthGrace"`
 }
 
 // Parse parses the command line flags and returns the configuration.
@@ -45,6 +50,7 @@ func Parse() (Config, []string) {
 	fs.StringVar(&serviceAddressRange, "service-address-range", "", "service address range (defaults to a /64 ULA derived from the cluster name)")
 	fs.StringSliceVar(&c.Nodes, "node", []string{"node-a"}, "node names (can be specified multiple times)")
 	fs.StringVar(&logLevels, "log-level", "error", "a bare log level, or tag=level overrides")
+	fs.DurationVar(&c.HealthGrace, "health-grace", 5*time.Minute, "how long a critical component may be unhealthy before the control plane gives up")
 
 	fs.Parse(os.Args[1:])
 
@@ -86,6 +92,10 @@ func (c *Config) Validate() error {
 			stateHome = filepath.Join(userHomeDir, ".local", "state")
 		}
 		c.Root = filepath.Join(stateHome, "runkube", c.Name)
+	}
+
+	if c.HealthGrace <= 0 {
+		return fmt.Errorf("invalid health-grace: must be positive")
 	}
 
 	if c.ExternalHostname == "" {

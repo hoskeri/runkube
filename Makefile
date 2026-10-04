@@ -13,7 +13,7 @@ $(DESTDIR):
 	@mkdir -p $(DESTDIR)
 
 run: $(DESTDIR)/runkube
-	@./$(DESTDIR)/runkube --log-level info
+	@./$(DESTDIR)/runkube
 
 test:
 	@CGO_ENABLED=0 go test -v ./...

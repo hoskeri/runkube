@@ -6,7 +6,6 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"fmt"
-	"log/slog"
 	"net/netip"
 	"net/url"
 	"os"
@@ -35,29 +34,31 @@ type ControlPlane struct {
 	pkistore     *pki.Store
 	syncer       *syncer.Syncer
 	unixListener bool
+	// transports memoizes the health probes' HTTP transports (see health.go).
+	transports transportCache
 }
 
 // Run starts the control plane components.
 func (c *ControlPlane) Run(ctx context.Context) error {
+	// The root level follows --log-level's default, so a debug run also shows
+	// the healthy half of the component status reports (they are Debug-level by
+	// design; degraded and unhealthy are not).
 	logs := termhandler.New(ctx, os.Stdin, os.Stdout, os.Stderr, &termhandler.Options{
-		Level:   slog.LevelInfo,
+		Level:   c.LogLevels.Default,
 		Columns: -1,
 	})
 	defer logs.Close()
 
 	fm := &process.Formation{
-		Logs: logs,
-		Processes: slices.Concat([]*process.Process{
-			c.Etcd(),
-			c.APIServer(),
-			c.Controller(),
-			c.Scheduler(),
-			c.Webhook(),
-			c.KMSPlugin(),
-			c.JWTSigner(),
-		}, c.nodeProcesses()),
+		Logs:      logs,
+		Processes: c.healthProcesses(),
 		Workdir:   c.Root,
 		LogLevels: c.LogLevels,
+		// Every component is probed on this interval, and the formation's own
+		// Status callback (health.FormationStatus) decides when a health
+		// problem is bad enough to bring the cluster down.
+		StatusInterval: HealthInterval,
+		Status:         c.FormationStatus(),
 	}
 
 	return fm.Run(ctx)

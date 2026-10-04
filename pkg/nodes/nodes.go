@@ -176,7 +176,7 @@ authorization:
 }
 
 func (c *Node) Kubelet() *process.Process {
-	return &process.Process{
+	p := &process.Process{
 		Tag: "kubelet",
 		CmdArgs: []string{
 			"kubelet",
@@ -188,6 +188,7 @@ func (c *Node) Kubelet() *process.Process {
 			"--node-ip", c.nodeAddress(),
 		},
 	}
+	return withHealth(p, probeKubeletHealth)
 }
 
 func (c *Node) configRef(s string) *ref.Config {
@@ -217,11 +218,11 @@ func (c *Node) CRIServer() *process.Process {
 		panic(err)
 	}
 
-	return &process.Process{
+	return withHealth(&process.Process{
 		Tag:     "criserver",
 		CmdArgs: []string{c.selfBinary(), "criserver"},
 		Environ: []string{env},
-	}
+	}, probeCRISocket(c.ContainerRuntimeEndpoint()))
 }
 
 func (c *Node) Init(ctx context.Context) error {
@@ -254,6 +255,10 @@ func (c *Node) Run(ctx context.Context) error {
 			c.CRIServer(),
 		},
 		LogLevels: process.LogLevels{Default: c.LogLevel},
+		// Probe the kubelet and the CRI server on the node's own cadence; the
+		// node's own formation is not torn down on a health verdict, so a
+		// sick node is reported to the control plane and left to heal.
+		StatusInterval: HealthInterval,
 	}
 
 	return fm.Run(ctx)

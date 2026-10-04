@@ -3,8 +3,6 @@ package runkube
 import (
 	"slices"
 	"testing"
-
-	"github.com/hoskeri/runkube/pkg/config"
 )
 
 // TestChildSubcommandsInheritConfig guards against re-executed runkube
@@ -12,10 +10,10 @@ import (
 // back to cluster name "default" and the default root. Their command lines must
 // carry the parent's identity so a non-default cluster works at all.
 func TestChildSubcommandsInheritConfig(t *testing.T) {
-	c := &ControlPlane{Config: config.Config{
+	c := &ControlPlane{
 		Name: "mytest",
 		Root: "/var/lib/runkube/mytest",
-	}}
+	}
 
 	for _, tc := range []struct {
 		tag  string
