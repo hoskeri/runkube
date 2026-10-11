@@ -6,7 +6,6 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -20,11 +19,10 @@ import (
 
 	"github.com/hoskeri/procman/pkg/process"
 	"github.com/hoskeri/procman/pkg/status"
+	"github.com/hoskeri/runkube/pkg/client"
 	"github.com/hoskeri/runkube/pkg/pki"
-	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
-	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	grpcstatus "google.golang.org/grpc/status"
 )
 
@@ -161,135 +159,74 @@ func (c *ControlPlane) clientTLS(ca string, clientCert *pki.Leaf) (*tls.Config, 
 	return cfg, nil
 }
 
-// transportCache memoizes HTTP transports by key.
-//
-// Health probes run every HealthInterval against the same handful of
-// endpoints. Caching the transport per endpoint means each poll reuses the
-// established connection and the already-parsed CA and client certificate,
-// instead of re-reading them from disk and re-handshaking TLS every 5 seconds.
-// A transport is safe for concurrent use, and one probe's context deadline
-// never outlives its own request, so a shared cache is fine.
-type transportCache struct {
-	mu sync.Mutex
-	m  map[string]*http.Transport
-}
-
-func (tc *transportCache) get(key string, build func() (*http.Transport, error)) (*http.Transport, error) {
-	tc.mu.Lock()
-	defer tc.mu.Unlock()
-	if tc.m == nil {
-		tc.m = make(map[string]*http.Transport)
-	}
-	if tr, ok := tc.m[key]; ok {
-		return tr, nil
-	}
-	tr, err := build()
-	if err != nil {
-		return nil, err
-	}
-	tc.m[key] = tr
-	return tr, nil
-}
-
-// tlsTransport returns the cached transport that dials addr over TCP, verifies
-// the server as serverName against ca, and presents clientCert (nil for
-// server-only probes).
-func (c *ControlPlane) tlsTransport(key, addr, serverName, ca string, clientCert *pki.Leaf) (*http.Transport, error) {
-	return c.transports.get(key, func() (*http.Transport, error) {
-		cfg, err := c.clientTLS(ca, clientCert)
+// apiClient returns the client used to call the apiserver's own HTTP
+// endpoints (/livez, /readyz, ...): TLS against the apiserver CA, verified as
+// the internal listen address, presenting the system-admin client certificate
+// so authenticated paths are reachable too. The transport is cached per
+// endpoint (see client.TransportCache).
+func (c *ControlPlane) apiClient() (*client.HTTP, error) {
+	addr := c.internalListenAddr()
+	target := netip.AddrPortFrom(addr, apiServerPort).String()
+	rt, err := c.transports.Get("api", func() (*http.Transport, error) {
+		cfg, err := c.clientTLS(pki.APIServer, c.pkiStore().Leaf("system-admin"))
 		if err != nil {
 			return nil, err
 		}
-		cfg.ServerName = serverName
-		var d net.Dialer
-		return &http.Transport{
-			TLSClientConfig: cfg,
-			IdleConnTimeout: 30 * time.Second,
-			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				return d.DialContext(ctx, "tcp", addr)
-			},
-		}, nil
+		return client.TLSTransport(target, addr.String(), cfg), nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	return client.NewHTTP("https", target, rt), nil
 }
 
-// unixTransport returns the cached transport that speaks plain HTTP over the
-// unix socket named socket. The host in the request URL is unused (the dialer
-// ignores it) but must be syntactically valid.
-func (c *ControlPlane) unixTransport(key, socket string) (*http.Transport, error) {
-	return c.transports.get(key, func() (*http.Transport, error) {
-		var d net.Dialer
-		return &http.Transport{
-			IdleConnTimeout: 30 * time.Second,
-			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				return d.DialContext(ctx, "unix", socket)
-			},
-		}, nil
-	})
-}
-
-// apiTransport returns the transport used to call the apiserver's own HTTP
-// endpoints (/livez, /readyz, ...): TLS against the apiserver CA, verified as
-// the internal listen address, presenting the system-admin client certificate
-// so authenticated paths are reachable too.
-func (c *ControlPlane) apiTransport() (*http.Transport, error) {
-	addr := c.internalListenAddr()
-	return c.tlsTransport(
-		"api",
-		netip.AddrPortFrom(addr, apiServerPort).String(),
-		addr.String(),
-		pki.APIServer,
-		c.pkiStore().Leaf("system-admin"),
-	)
-}
-
-// componentTransport returns the transport used to call a kube component's own
+// componentClient returns the client used to call a kube component's own
 // HTTPS endpoints on its secure port. The component's serving leaf is issued
 // for hostname(serving), which is what the server is verified as.
-func (c *ControlPlane) componentTransport(ca, serving string, port uint16) (*http.Transport, error) {
+func (c *ControlPlane) componentClient(ca, serving string, port uint16) (*client.HTTP, error) {
 	addr := c.internalListenAddr()
-	return c.tlsTransport(
-		"component/"+serving,
-		netip.AddrPortFrom(addr, port).String(),
-		c.hostname(serving),
-		ca,
-		nil,
-	)
+	target := netip.AddrPortFrom(addr, port).String()
+	rt, err := c.transports.Get("component/"+serving, func() (*http.Transport, error) {
+		cfg, err := c.clientTLS(ca, nil)
+		if err != nil {
+			return nil, err
+		}
+		return client.TLSTransport(target, c.hostname(serving), cfg), nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return client.NewHTTP("https", target, rt), nil
 }
 
-// get performs a GET through rt and returns the response status. host is used
-// only to build the request URL (scheme selects TLS or not); the transport
-// decides where the bytes actually go.
-func get(ctx context.Context, rt http.RoundTripper, scheme, host, urlPath string) (int, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, scheme+"://"+host+urlPath, nil)
+// unixClient returns the client that speaks plain HTTP over the unix socket
+// named socket.
+func (c *ControlPlane) unixClient(socket string) (*client.HTTP, error) {
+	rt, err := c.transports.Get("unix/"+socket, func() (*http.Transport, error) {
+		return client.UnixTransport(socket), nil
+	})
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	resp, err := (&http.Client{Transport: rt}).Do(req)
-	if err != nil {
-		return 0, err
-	}
-	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, resp.Body)
-	return resp.StatusCode, nil
+	return client.NewHTTP("http", "unix.invalid", rt), nil
 }
 
 // getAPI performs a GET against the apiserver.
 func (c *ControlPlane) getAPI(ctx context.Context, urlPath string) (int, error) {
-	rt, err := c.apiTransport()
+	hc, err := c.apiClient()
 	if err != nil {
 		return 0, err
 	}
-	host := netip.AddrPortFrom(c.internalListenAddr(), apiServerPort).String()
-	return get(ctx, rt, "https", host, urlPath)
+	return hc.Get(ctx, urlPath)
 }
 
 // getUnix performs a plain-HTTP GET over a unix socket.
 func (c *ControlPlane) getUnix(ctx context.Context, socket, urlPath string) (int, error) {
-	rt, err := c.unixTransport(socket, socket)
+	hc, err := c.unixClient(socket)
 	if err != nil {
 		return 0, err
 	}
-	return get(ctx, rt, "http", "unix.invalid", urlPath)
+	return hc.Get(ctx, urlPath)
 }
 
 // readyPath is the readiness endpoint. A 5xx from it means "up, not ready
@@ -319,7 +256,6 @@ func probeStatus(code int, urlPath string) error {
 // shelling out to `etcdctl endpoint health`, which forked a process on every
 // probe and re-derived the same TLS material from disk each time.
 func (c *ControlPlane) probeEtcd(ctx context.Context) error {
-
 	socket := c.unixSocketPath("etcd").Path
 	cfg, err := c.clientTLS(pki.Etcd, c.pkiStore().Leaf("apiserver-etcd-client"))
 	if err != nil {
@@ -328,15 +264,13 @@ func (c *ControlPlane) probeEtcd(ctx context.Context) error {
 	// etcd's serving leaf carries the socket's base name as its only DNS SAN.
 	cfg.ServerName = filepath.Base(socket)
 
-	conn, err := grpc.NewClient("unix://"+socket,
-		grpc.WithTransportCredentials(credentials.NewTLS(cfg)),
-	)
+	gc, err := client.Dial("unix://"+socket, credentials.NewTLS(cfg))
 	if err != nil {
 		return &notServingError{err}
 	}
-	defer conn.Close()
+	defer gc.Close()
 
-	resp, err := healthpb.NewHealthClient(conn).Check(ctx, &healthpb.HealthCheckRequest{Service: ""})
+	err = gc.HealthCheck(ctx, "")
 	switch {
 	case err == nil:
 	case grpcstatus.Code(err) == codes.Unavailable:
@@ -346,9 +280,6 @@ func (c *ControlPlane) probeEtcd(ctx context.Context) error {
 		return &notServingError{fmt.Errorf("etcd health: %w", err)}
 	default:
 		return fmt.Errorf("etcd health: %w", err)
-	}
-	if resp.GetStatus() != healthpb.HealthCheckResponse_SERVING {
-		return fmt.Errorf("etcd health: serving status %s", resp.GetStatus())
 	}
 	return nil
 }
@@ -379,13 +310,12 @@ func (c *ControlPlane) probeAPIServer(ctx context.Context) error {
 // while kube-scheduler serves the full /healthz, /livez, /readyz set.
 func (c *ControlPlane) probeComponentStatus(ca, serving string, port uint16, paths ...string) func(context.Context) error {
 	return func(ctx context.Context) error {
-		rt, err := c.componentTransport(ca, serving, port)
+		hc, err := c.componentClient(ca, serving, port)
 		if err != nil {
 			return err
 		}
-		host := netip.AddrPortFrom(c.internalListenAddr(), port).String()
 		for _, p := range paths {
-			code, err := get(ctx, rt, "https", host, p)
+			code, err := hc.Get(ctx, p)
 			if err != nil {
 				return err
 			}

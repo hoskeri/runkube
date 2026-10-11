@@ -17,6 +17,7 @@ import (
 
 	"github.com/hoskeri/procman/pkg/process"
 	"github.com/hoskeri/procman/pkg/termhandler"
+	"github.com/hoskeri/runkube/pkg/client"
 	"github.com/hoskeri/runkube/pkg/config"
 	"github.com/hoskeri/runkube/pkg/kapi"
 	"github.com/hoskeri/runkube/pkg/nodes"
@@ -35,7 +36,7 @@ type ControlPlane struct {
 	syncer       *syncer.Syncer
 	unixListener bool
 	// transports memoizes the health probes' HTTP transports (see health.go).
-	transports transportCache
+	transports client.TransportCache
 }
 
 // Run starts the control plane components.
