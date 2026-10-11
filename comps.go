@@ -39,9 +39,9 @@ func (c *ControlPlane) Etcd() *process.Process {
 			"--listen-peer-urls", c.unixSocketPath("etcd-peer").String(),
 			"--listen-client-http-urls", c.unixSocketPath("etcd-http").String(),
 
-			"--initial-cluster", fmt.Sprintf("%s=%s", etcdName, c.internalListenURL(443, "")),
-			"--advertise-client-urls", c.internalListenURL(443, ""),
-			"--initial-advertise-peer-urls", c.internalListenURL(443, ""),
+			"--initial-cluster", fmt.Sprintf("%s=%s", etcdName, c.internalListenURL(0, "")),
+			"--advertise-client-urls", c.internalListenURL(0, ""),
+			"--initial-advertise-peer-urls", c.internalListenURL(0, ""),
 
 			"--cert-file", c.pkiStore().Leaf("etcd-serving").CertPath(),
 			"--key-file", c.pkiStore().Leaf("etcd-serving").KeyPath(),
@@ -126,6 +126,7 @@ func (c *ControlPlane) APIServer() *process.Process {
 
 // Controller returns a process description for the kube-controller-manager.
 func (c *ControlPlane) Controller() *process.Process {
+	controllerManagerPort := uint16(10257)
 	return c.withHealth(&process.Process{
 		Tag: "controller",
 		CmdArgs: []string{
@@ -138,7 +139,7 @@ func (c *ControlPlane) Controller() *process.Process {
 
 			"--leader-elect=false",
 			"--bind-address", c.internalListenAddr().String(),
-			"--secure-port", strconv.Itoa(controllerManagerPort),
+			"--secure-port", strconv.Itoa(int(controllerManagerPort)),
 			"--tls-cert-file", c.pkiStore().Leaf("controller-manager-server").CertPath(),
 			"--tls-private-key-file", c.pkiStore().Leaf("controller-manager-server").KeyPath(),
 
@@ -155,6 +156,7 @@ func (c *ControlPlane) Controller() *process.Process {
 
 // Scheduler returns a process description for the kube-scheduler.
 func (c *ControlPlane) Scheduler() *process.Process {
+	schedulerPort := uint16(10259)
 	return c.withHealth(&process.Process{
 		Tag: "scheduler",
 		CmdArgs: []string{
@@ -166,7 +168,7 @@ func (c *ControlPlane) Scheduler() *process.Process {
 			"--logging-format=json",
 
 			"--bind-address", c.internalListenAddr().String(),
-			"--secure-port", strconv.Itoa(schedulerPort),
+			"--secure-port", strconv.Itoa(int(schedulerPort)),
 			"--tls-cert-file", c.pkiStore().Leaf("scheduler-server").CertPath(),
 			"--tls-private-key-file", c.pkiStore().Leaf("scheduler-server").KeyPath(),
 

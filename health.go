@@ -54,15 +54,6 @@ const probeTimeout = 3 * time.Second
 // apiServerPort is the apiserver's secure port (see APIServer).
 const apiServerPort = 6443
 
-// controllerManagerPort and schedulerPort are the secure ports the controller
-// manager and the scheduler serve /livez on. They are passed explicitly on the
-// command lines (see Controller, Scheduler) so the probe cannot drift from the
-// process it is probing.
-const (
-	controllerManagerPort = 10257
-	schedulerPort         = 10259
-)
-
 // withHealth attaches a probe to a process description. probe returns nil when
 // healthy, and an error describing what went wrong otherwise.
 func (c *ControlPlane) withHealth(p *process.Process, probe func(context.Context) error) *process.Process {
@@ -369,12 +360,6 @@ func probeUnixSocketAccepting(socket string) func(context.Context) error {
 	}
 }
 
-// --- wiring -----------------------------------------------------------------
-
-// Processes returns the control-plane process list. Each component attaches its
-// own health probe as it is described (see comps.go), the way the node's
-// processes do in pkg/nodes; the one-shot subcommands (kms, jwtsigner) get
-// probes too, since they stay up for the life of the formation.
 func (c *ControlPlane) healthProcesses() []*process.Process {
 	ps := []*process.Process{
 		c.Etcd(),

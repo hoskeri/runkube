@@ -13,10 +13,10 @@ $(DESTDIR):
 	@mkdir -p $(DESTDIR)
 
 run: $(DESTDIR)/runkube
-	@./$(DESTDIR)/runkube
+	@./$(DESTDIR)/runkube $(ARGS)
 
 test:
-	@CGO_ENABLED=0 go test -v ./...
+	@CGO_ENABLED=0 go test -v ./... $(ARGS)
 
 # Build the binary once, then run the end-to-end tests against it. These boot a
 # real single-node cluster and therefore need a working Linux sandbox (user

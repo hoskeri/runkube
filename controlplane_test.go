@@ -9,19 +9,15 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	"github.com/hoskeri/runkube/pkg/config"
 )
 
 func testControlPlane(t *testing.T) *ControlPlane {
 	t.Helper()
 	return &ControlPlane{
-		Config: config.Config{
-			Name:             "test",
-			Root:             t.TempDir(),
-			ExternalHostname: "test.runkube.local",
-			Nodes:            []string{},
-		},
+		Name:             "test",
+		Root:             t.TempDir(),
+		ExternalHostname: "test.runkube.local",
+		Nodes:            []string{},
 	}
 }
 

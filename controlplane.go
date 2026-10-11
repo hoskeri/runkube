@@ -32,11 +32,13 @@ import (
 type ControlPlane struct {
 	config.Config
 
-	pkistore     *pki.Store
-	syncer       *syncer.Syncer
-	unixListener bool
+	pkistore *pki.Store
+	syncer   *syncer.Syncer
 	// transports memoizes the health probes' HTTP transports (see health.go).
 	transports client.TransportCache
+
+	// some day apiserver will implement a unix listener.
+	unixListener bool
 }
 
 // Run starts the control plane components.
