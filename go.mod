@@ -5,7 +5,7 @@ go 1.27.1
 require (
 	github.com/fxamacker/cbor/v2 v2.9.0
 	github.com/go-jose/go-jose/v4 v4.1.4
-	github.com/hoskeri/procman v0.0.0-20261004190521-e48f9f6887ba
+	github.com/hoskeri/procman v0.0.0-20261011232149-367fe1cee421
 	github.com/spf13/pflag v1.0.10
 	github.com/vishvananda/netlink v1.3.1
 	go.etcd.io/bbolt v1.5.0
