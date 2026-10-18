@@ -53,6 +53,7 @@ func (c *ControlPlane) Run(ctx context.Context) error {
 	defer logs.Close()
 
 	fm := &process.Formation{
+		Name:      "runkube",
 		Logs:      logs,
 		Processes: c.healthProcesses(),
 		Workdir:   c.Root,

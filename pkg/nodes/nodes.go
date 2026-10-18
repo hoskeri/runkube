@@ -248,6 +248,7 @@ func (c *Node) Run(ctx context.Context) error {
 	defer logs.Close()
 
 	fm := &process.Formation{
+		Name:    "runkube",
 		Workdir: c.Root,
 		Logs:    logs,
 		Processes: []*process.Process{
