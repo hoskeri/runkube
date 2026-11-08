@@ -43,8 +43,9 @@ import (
 // A component that is merely slow to start therefore does not scream: it is
 // Degraded while its socket is missing and becomes Healthy on its own.
 
-// HealthInterval is how often the control plane's health probes run: it is the
-// formation's procman StatusInterval, so every component shares one cadence.
+// HealthInterval is the control plane's expected health-probe cadence.  It
+// matches procman's default status poll interval; keep probeTimeout below it
+// so a hung endpoint cannot stall a poll cycle.
 const HealthInterval = 5 * time.Second
 
 // probeTimeout bounds a single probe. It is well below HealthInterval so a
@@ -432,24 +433,19 @@ func critical(identity string, c process.ComponentStatus) bool {
 // FormationStatus is the control plane's health policy: the one place allowed
 // to bring the formation down for a health reason.
 //
-// It reads the aggregate view procman attaches to ctx. A critical component
+// It receives the aggregate view from procman on every tick. A critical component
 // (etcd, the apiserver) that stays unhealthy for longer than HealthGrace is
 // treated as fatal — a control plane without its store or its API is not going
 // to recover by itself. Everything else (a flapping webhook, a node that has
 // not come up yet) is reported and waited out.
-func (c *ControlPlane) FormationStatus() func(context.Context) error {
+func (c *ControlPlane) FormationStatus() func(context.Context, process.StatusView) error {
 	return c.formationStatusWith(&health{grace: c.HealthGrace})
 }
 
 // formationStatusWith is FormationStatus with an injectable health tracker
 // (tests drive the clock through it).
-func (c *ControlPlane) formationStatusWith(h *health) func(context.Context) error {
-	return func(ctx context.Context) error {
-		v, ok := process.StatusViewFromContext(ctx)
-		if !ok {
-			return nil
-		}
-
+func (c *ControlPlane) formationStatusWith(h *health) func(context.Context, process.StatusView) error {
+	return func(_ context.Context, v process.StatusView) error {
 		var bad []string
 		for _, comp := range v.Components {
 			if critical(comp.Identity(), comp) {

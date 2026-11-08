@@ -4,6 +4,8 @@ github.com/Nerdmaster/terminal v0.12.1 h1:DGb3ya55nZdqdBMjWQHNF5mHYHS2eJgYLqmw3K
 github.com/Nerdmaster/terminal v0.12.1/go.mod h1:Dg6++m3aF+P/l8RdYb/2N6zK3CqvUfzhBreUNEWuQ8M=
 github.com/blang/semver/v4 v4.0.0 h1:1PFHFE6yCCTv8C1TeyNNarDzntLi7wMI5i/pzqYIsAM=
 github.com/blang/semver/v4 v4.0.0/go.mod h1:IbckMUScFkM3pff0VJDNKRiT6TG/YpiHIM2yvyW5YoQ=
+github.com/cenkalti/backoff/v7 v7.0.1 h1:+ulHti5s1d9QnfyOnLWVmQ/SaZ+TJQF9OdOI0i9BGZI=
+github.com/cenkalti/backoff/v7 v7.0.1/go.mod h1:qcKBGwsu4hpxHtQ8tWYsQ+ifzx2+sS+Xx/3jfe30lI8=
 github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UFvs=
 github.com/cespare/xxhash/v2 v2.3.0/go.mod h1:VGX0DQ3Q6kWi7AoAeZDth3/j3BFtOZR5XLFGgcrjCOs=
 github.com/cpuguy83/go-md2man/v2 v2.0.6/go.mod h1:oOW0eioCTA6cOiMLiUPZOpcVxMig6NIQQ7OS05n1F4g=
@@ -71,14 +73,8 @@ github.com/google/go-cmp v0.7.0/go.mod h1:pXiqmnSA92OHEEa9HXL2W4E7lf9JzCmGVUdgjX
 github.com/google/gofuzz v1.0.0/go.mod h1:dBl0BpW6vV/+mYPU4Po3pmUjxk6FQPldtuIdl/M65Eg=
 github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=
 github.com/google/uuid v1.6.0/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=
-github.com/hoskeri/procman v0.0.0-20260920193915-f6725f29a531 h1:yHD27Rcjc99mF+UvLlQtwvjeDSc4hUBohaB1khxY6PM=
-github.com/hoskeri/procman v0.0.0-20260920193915-f6725f29a531/go.mod h1:UPD787kQC9DkFXCHgT2zKBoQepLcMKoi76IIVhsjf8c=
-github.com/hoskeri/procman v0.0.0-20261004005425-a8e51efa092b h1:kE9nl6XndnucLefYu2g5BMviNyoa1kjjLqI1Eznw8eA=
-github.com/hoskeri/procman v0.0.0-20261004005425-a8e51efa092b/go.mod h1:UPD787kQC9DkFXCHgT2zKBoQepLcMKoi76IIVhsjf8c=
-github.com/hoskeri/procman v0.0.0-20261004190521-e48f9f6887ba h1:T7OFROfoMyxRxhnzV2dBU+SXiSOOqtm+R0ScqOhPPzU=
-github.com/hoskeri/procman v0.0.0-20261004190521-e48f9f6887ba/go.mod h1:UPD787kQC9DkFXCHgT2zKBoQepLcMKoi76IIVhsjf8c=
-github.com/hoskeri/procman v0.0.0-20261011232149-367fe1cee421 h1:o+MdyrIh7RCf5nx4wn9Hj6+wzZMOm3mJgyL/W28oShI=
-github.com/hoskeri/procman v0.0.0-20261011232149-367fe1cee421/go.mod h1:UPD787kQC9DkFXCHgT2zKBoQepLcMKoi76IIVhsjf8c=
+github.com/hoskeri/procman v0.0.0-20261108185945-addd263dca8f h1:PzJjTON0kY8TNfq/UYn5a/Cir4kCe6mWQuaGV5nDP7w=
+github.com/hoskeri/procman v0.0.0-20261108185945-addd263dca8f/go.mod h1:yXZUQGVcMtcmvybxwpJey9u6TLmUjNfXo6P20464DlE=
 github.com/inconshreveable/mousetrap v1.1.0 h1:wN+x4NVGpMsO7ErUn/mUI3vEoE6Jt13X2s0bqwp9tc8=
 github.com/inconshreveable/mousetrap v1.1.0/go.mod h1:vpF70FUmC8bwa3OWnCshd2FqLfsEA9PFc4w1p2J65bw=
 github.com/json-iterator/go v1.1.12 h1:PV8peI4a0ysnczrg+LtxykD8LfKY9ML6u2jnxaEnrnM=

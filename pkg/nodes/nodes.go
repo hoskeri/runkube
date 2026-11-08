@@ -256,10 +256,8 @@ func (c *Node) Run(ctx context.Context) error {
 			c.CRIServer(),
 		},
 		LogLevels: process.LogLevels{Default: c.LogLevel},
-		// Probe the kubelet and the CRI server on the node's own cadence; the
-		// node's own formation is not torn down on a health verdict, so a
+		// The node's own formation is not torn down on a health verdict, so a
 		// sick node is reported to the control plane and left to heal.
-		StatusInterval: HealthInterval,
 	}
 
 	return fm.Run(ctx)

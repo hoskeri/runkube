@@ -18,8 +18,8 @@ import (
 )
 
 // view builds the aggregate procman hands to the formation's Status callback.
-func view(components ...process.ComponentStatus) context.Context {
-	return process.WithStatusView(context.Background(), process.StatusView{Components: components})
+func view(components ...process.ComponentStatus) process.StatusView {
+	return process.StatusView{Components: components}
 }
 
 func comp(tag string, st status.State) process.ComponentStatus {
@@ -75,9 +75,9 @@ func TestFormationStatusGrace(t *testing.T) {
 	h := &health{grace: time.Minute}
 	policy := c.formationStatusWith(h)
 
-	ctx := view(comp("etcd", status.StateHealthy), comp("api", status.StateUnhealthy))
+	v := view(comp("etcd", status.StateHealthy), comp("api", status.StateUnhealthy))
 
-	if err := policy(ctx); err != nil {
+	if err := policy(context.Background(), v); err != nil {
 		t.Fatalf("first unhealthy poll must be tolerated, got %v", err)
 	}
 	if h.unhealthySince.IsZero() {
@@ -86,13 +86,13 @@ func TestFormationStatusGrace(t *testing.T) {
 
 	// Still inside the grace window.
 	h.unhealthySince = time.Now().Add(-30 * time.Second)
-	if err := policy(ctx); err != nil {
+	if err := policy(context.Background(), v); err != nil {
 		t.Fatalf("inside the grace window: got %v", err)
 	}
 
 	// Past the grace window: fatal.
 	h.unhealthySince = time.Now().Add(-2 * time.Minute)
-	err := policy(ctx)
+	err := policy(context.Background(), v)
 	if err == nil {
 		t.Fatal("expected a fatal status past the grace window")
 	}
@@ -118,16 +118,16 @@ func TestFormationStatusRecovers(t *testing.T) {
 	bad := view(comp("api", status.StateUnhealthy))
 	good := view(comp("api", status.StateHealthy))
 
-	if err := policy(bad); err != nil {
+	if err := policy(context.Background(), bad); err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
-	if err := policy(good); err != nil {
+	if err := policy(context.Background(), good); err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
 	if !h.unhealthySince.IsZero() {
 		t.Error("recovery must reset the grace clock")
 	}
-	if err := policy(bad); err != nil {
+	if err := policy(context.Background(), bad); err != nil {
 		t.Fatalf("a new blip must be tolerated again, got %v", err)
 	}
 }
@@ -139,9 +139,9 @@ func TestFormationStatusNonCritical(t *testing.T) {
 	h := &health{grace: time.Nanosecond}
 	policy := c.formationStatusWith(h)
 
-	ctx := view(comp("webhook", status.StateUnhealthy), comp("node-a", status.StateUnhealthy))
+	v := view(comp("webhook", status.StateUnhealthy), comp("node-a", status.StateUnhealthy))
 	h.unhealthySince = time.Now().Add(-time.Hour)
-	if err := policy(ctx); err != nil {
+	if err := policy(context.Background(), v); err != nil {
 		t.Fatalf("only etcd, the apiserver, and explicit failures are critical; got %v", err)
 	}
 	if !h.unhealthySince.IsZero() {
@@ -156,20 +156,20 @@ func TestFormationStatusFailedIsFatal(t *testing.T) {
 	h := &health{grace: time.Minute}
 	policy := c.formationStatusWith(h)
 
-	ctx := view(comp("webhook", status.StateFailed))
-	if err := policy(ctx); err != nil {
+	v := view(comp("webhook", status.StateFailed))
+	if err := policy(context.Background(), v); err != nil {
 		t.Fatalf("inside the grace window: %v", err)
 	}
 	h.unhealthySince = time.Now().Add(-2 * time.Minute)
-	if err := policy(ctx); err == nil {
+	if err := policy(context.Background(), v); err == nil {
 		t.Fatal("a failed component past the grace window must be fatal")
 	}
 }
 
-func TestFormationStatusWithoutView(t *testing.T) {
+func TestFormationStatusEmptyView(t *testing.T) {
 	c := &ControlPlane{}
-	if err := c.formationStatusWith(&health{grace: time.Minute})(context.Background()); err != nil {
-		t.Errorf("no view attached should be a no-op, got %v", err)
+	if err := c.formationStatusWith(&health{grace: time.Minute})(context.Background(), process.StatusView{}); err != nil {
+		t.Errorf("an empty view should be a no-op, got %v", err)
 	}
 }
 

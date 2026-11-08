@@ -58,11 +58,7 @@ func (c *ControlPlane) Run(ctx context.Context) error {
 		Processes: c.healthProcesses(),
 		Workdir:   c.Root,
 		LogLevels: c.LogLevels,
-		// Every component is probed on this interval, and the formation's own
-		// Status callback (health.FormationStatus) decides when a health
-		// problem is bad enough to bring the cluster down.
-		StatusInterval: HealthInterval,
-		Status:         c.FormationStatus(),
+		Status:    c.FormationStatus(),
 	}
 
 	return fm.Run(ctx)
@@ -395,7 +391,6 @@ func (c *ControlPlane) node(nodeName string) *nodes.Node {
 		Kubeconfig:    c.kubeConfigRef(nodeName).Path,
 		KubeletBinary: kp,
 		MachineID:     hex.EncodeToString(h.Sum(nil)[0:16]),
-		LogLevel:      c.LogLevels.For(nodeName),
 	}
 }
 
